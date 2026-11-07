@@ -16,9 +16,10 @@ ADDRESSES = (
 START = 'DWC3 read-only identity probe; no USB initialization'
 SELFTEST = 'dwc3_ro guard selftest passed: RAM and translation-fault recovery'
 FINISH = 'dwc3_ro finished; identification is not a USB link'
+RECOVERY = 'dwc3_ro recovery verified; controller target reads inhibited'
 
 
-def analyze(text):
+def analyze(text, irq_only=False, recovery_only=False):
     if text.count(START) != 1:
         raise ValueError('expected exactly one probe start marker')
     section = text.split(START, 1)[1]
@@ -36,7 +37,7 @@ def analyze(text):
 
     skipped = re.findall(r'dwc3_ro skipped: ([^\r\n]+)', section)
     if skipped:
-        if len(skipped) != 1 or FINISH in section or any(k == 'dwc3_ro_read_index' for k, _ in records):
+        if len(skipped) != 1 or FINISH in section or RECOVERY in section or any(k == 'dwc3_ro_read_index' for k, _ in records):
             raise ValueError('contradictory skipped-probe evidence')
         # Avoid forwarding arbitrary private log text as a diagnostic.
         reasons = ('CPU/MMU/vector precondition', 'identity MMIO mapping mismatch',
@@ -54,17 +55,47 @@ def analyze(text):
             report['cpsr_before_mask'] = hex(one('dwc3_ro_guard_cpsr_before'))
             report['cpsr_after_mask'] = hex(one('dwc3_ro_guard_cpsr_after'))
         return report
-    if section.count(SELFTEST) != 1 or section.count(FINISH) != 1:
+    expected_end = RECOVERY if recovery_only else FINISH
+    if section.count(SELFTEST) != 1 or section.count(expected_end) != 1:
         raise ValueError('incomplete or duplicated probe execution')
-    if one('dwc3_ro_guard_ram_result') != 0 or one('dwc3_ro_guard_cpsr_after') & 0x010002ff != 0xd3:
+    before = one('dwc3_ro_guard_cpsr_before')
+    after = one('dwc3_ro_guard_cpsr_after')
+    def valid_masks(pre, post):
+        if irq_only:
+            return (pre & 0x0100023f) == 0x13 and (post & 0x010002bf) == 0x93 and ((pre ^ post) & 0x0100037f) == 0
+        return (post & 0x010002ff) == 0xd3
+    if one('dwc3_ro_guard_ram_result') != 0 or not valid_masks(before, after):
         raise ValueError('guard RAM/mask precondition lacks successful readback evidence')
-    one('dwc3_ro_guard_cpsr_before')
     if one('dwc3_ro_guard_fault_address') != 0xdeadc000 or one('dwc3_ro_guard_fault_result') != 2:
         raise ValueError('guard selftest did not report expected fault')
-    if one('dwc3_ro_guard_fault_dfar') != 0xdeadc000 or one('dwc3_ro_guard_fault_dfsr') & 0x40f != 5:
+    dfsr = one('dwc3_ro_guard_fault_dfsr')
+    if one('dwc3_ro_guard_fault_dfar') != 0xdeadc000 or dfsr & 0x40f != 5 or dfsr & ~0x14ff:
         raise ValueError('guard selftest lacks expected translation-fault evidence')
     if not one('dwc3_ro_guard_ram_address') or not one('dwc3_ro_guard_fault_pc'):
         raise ValueError('guard selftest lacks nonzero RAM/PC evidence')
+    if irq_only or recovery_only:
+        fault_before = one('dwc3_ro_guard_fault_cpsr_before')
+        fault_after = one('dwc3_ro_guard_fault_cpsr_after')
+        if not valid_masks(fault_before, fault_after) or ((one('dwc3_ro_guard_fault_spsr') ^ fault_after) & 0x010002ff):
+            raise ValueError('fault SPSR does not match verified per-call context')
+        if (one('dwc3_ro_guard_fault_count') != 1 or one('dwc3_ro_guard_fault_active') != 0 or
+            one('dwc3_ro_guard_fault_status') != 2 or one('dwc3_ro_guard_fault_output') != 0xa55a12ed or
+            one('dwc3_ro_guard_fault_expected_pc') != one('dwc3_ro_guard_fault_pc')):
+            raise ValueError('fault recovery state/output/exact-PC evidence inconsistent')
+    if recovery_only:
+        forbidden = ('dwc3_ro_read_', 'dwc3_ro_watchdog_')
+        if FINISH in section or any(key.startswith(forbidden) or key in
+            ('dwc3_ro_status', 'dwc3_ro_completed_reads', 'dwc3_ro_valid_clocks',
+             'dwc3_ro_valid_registers', 'dwc3_ro_failed_slot') for key, _ in records):
+            raise ValueError('recovery-only capture contains target-read evidence')
+        return {'scope': 'guarded-recovery-only', 'result': 'recovery-verified',
+                'guard_selftest_passed': True, 'identification_passed': False,
+                'controller_target_reads_inhibited': True,
+                'cpsr_before_mask': hex(before), 'cpsr_after_mask': hex(after),
+                'fault_spsr': hex(one('dwc3_ro_guard_fault_spsr')),
+                'fault_pc': hex(one('dwc3_ro_guard_fault_pc'))}
+    if RECOVERY in section:
+        raise ValueError('identification capture reports inhibited target reads')
     first, second = one('dwc3_ro_watchdog_count_first'), one('dwc3_ro_watchdog_count_second')
     if not second > first:
         raise ValueError('watchdog did not advance')
@@ -155,8 +186,11 @@ def analyze(text):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('console', type=Path)
+    parser.add_argument('--irq-only', action='store_true')
+    parser.add_argument('--recovery-only', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(analyze(args.console.read_text(errors='replace')), indent=2, sort_keys=True))
+    print(json.dumps(analyze(args.console.read_text(errors='replace'),
+                             args.irq_only, args.recovery_only), indent=2, sort_keys=True))
 
 
 if __name__ == '__main__':

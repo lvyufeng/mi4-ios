@@ -57,13 +57,15 @@ def branch(source, target, opcode):
 
 
 class Fixture:
-    def __init__(self):
+    def __init__(self, irq_only=False, recovery_only=False):
+        self.irq_only, self.recovery_only = irq_only, recovery_only
         self.payload, self.entry = image(), image(0x100)
         self.config = ''.join('#define STAGE90_' + name + ' ' + value + '\n'
                               for name, value in (('DWC3_READONLY', '1'),
                               ('SKIP_USB_PREBOOT', '1'), ('CACHE_MODE', '0'),
                               ('PMAP_ATTR_MODE', '0'), ('HW_WATCHDOG', '1'),
-                              ('DEADMAN_ENABLE', '1')))
+                              ('DEADMAN_ENABLE', '1'),
+                               ('DWC3_TARGET_READS', '0' if recovery_only else '1')))
         symbols = {
             'stage90_guarded_read32_load_arm': (0x1000, 44),
             'stage90_guarded_read32_fault': (0x100c, 4),
@@ -135,6 +137,44 @@ class Fixture:
             '  1404: eb00003d bl 1500 <mi4_dwc3_identify>']
         self.dis = ''.join(f'{symbols[name][0]:08x} <{name}>:\n' + '\n'.join(lines) + '\n'
                            for name, lines in bodies.items())
+        if recovery_only:
+            self.dis = self.dis.replace('bl 1500 <mi4_dwc3_identify>',
+                                        'bl 1040 <stage90_guarded_read32>')
+            self.word(0x1404, branch(0x1404, 0x1040, 0xeb000000))
+            self.payload = self.payload.replace(MARKERS[-1], b'X'*len(MARKERS[-1]))
+            marker = b'dwc3_ro recovery verified; controller target reads inhibited\0'
+            self.payload[0x1600:0x1600+len(marker)] = marker
+        if irq_only:
+            self.config += '#define STAGE90_GUARDED_IRQ_ONLY 1\n'
+            extra = {'stage90_vectors': (0x1700, 32),
+                     'stage90_guarded_fiq_park': (0x1840, 28),
+                     'stage90_exception_common': (0x1900, 24),
+                     'platform_reboot': (0x1980, 4),
+                     'stage90_guarded_read32_irq_save': (0x1a00, 52),
+                     'stage90_guarded_read32_irq_restore': (0x1a40, 28)}
+            self.nm += ''.join(f'{addr:08x} {size:08x} T {name}\n'
+                               for name, (addr, size) in extra.items())
+            self.nm += '00001800 T stage90_guarded_fiq_hook_contract\n'
+            # Deliberately no vector_fiq label/disassembly: aliases need not be printed.
+            words = {
+                0x171c: (branch(0x171c, 0x1800, 0xea000000),),
+                0x1800: (0xe59f8018, 0xe5989000, 0xe3590000,
+                         branch(0x180c, 0x1840, 0x1a000000), 0xe59f000c,
+                         branch(0x1814, 0x1900, 0xea000000)),
+                0x1820: (0x2000, 0x2080),
+                0x1840: (0xe3a09007, 0xe5889018, 0xe3049651, 0xe3449752,
+                         0xe5889028, 0xe320f002, 0xeafffffd),
+                0x1900: (0xf10c00c0, 0xe1a04000, 0xe59f0000,
+                         branch(0x190c, 0x1980, 0xeb000000), 0xe320f002, 0xeafffffd),
+                0x1a00: (0xe10f0000, 0xe200101f, 0xe3510013, 0x112fff1e,
+                         0xe3100020, 0x112fff1e, 0xe3100c02, 0x112fff1e,
+                         0xe3100401, 0x112fff1e, 0xf10c0080, 0xf57ff06f, 0xe12fff1e),
+                0x1a40: (0xe10f1000, 0xe3c11080, 0xe2000080, 0xe1811000,
+                         0xe121f001, 0xf57ff06f, 0xe12fff1e),
+                0x2080: (0x00716966,)}
+            for address, values in words.items():
+                for i, value in enumerate(values):
+                    self.word(address+i*4, value)
 
     def word(self, va, value, entry=False):
         struct.pack_into('<I', self.entry if entry else self.payload, va-0x1000+0x100, value)
@@ -231,7 +271,8 @@ class CheckerTests(unittest.TestCase):
             output = io.StringIO()
             with mock.patch.object(CHECKER, 'command', side_effect=command) as calls:
                 with contextlib.redirect_stdout(output):
-                    CHECKER.inspect(payload, entry, config)
+                    CHECKER.inspect(payload, entry, config, irq_only=fixture.irq_only,
+                                    recovery_only=fixture.recovery_only)
             return output.getvalue(), calls.call_count
 
     def test_complete_positive_fixture(self):
@@ -266,6 +307,151 @@ class CheckerTests(unittest.TestCase):
         self.assertEqual((fixture.nm, fixture.dis), (original_nm, original_dis))
         with self.assertRaisesRegex(ValueError, 'actual guarded-load opcodes differ'):
             self.inspect_fixture(fixture)
+
+
+    def test_irq_only_positive_unsized_hook_and_negative_literals(self):
+        fixture = Fixture(irq_only=True)
+        self.assertNotIn('vector_fiq', fixture.nm)
+        self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+        # GNU as may put either literal behind the instruction (U=0).
+        fixture.word(0x1800, 0xe51f8018)
+        fixture.word(0x17f0, 0x2000)
+        fixture.word(0x1810, 0xe51f002c)
+        fixture.word(0x17ec, 0x2080)
+        self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+        # A file-backed data LOAD can hold literals without executable permission.
+        struct.pack_into('<H', fixture.payload, 44, 2)
+        struct.pack_into('<8I', fixture.payload, 84, 1, 0x180, 0x2800, 0x2800, 8, 8, 4, 4)
+        struct.pack_into('<2I', fixture.payload, 0x180, 0x2000, 0x2080)
+        fixture.word(0x1800, 0xe59f8ff8)  # 0x1808 + 0xff8 = 0x2800.
+        fixture.word(0x1810, 0xe59f0fec)
+        self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+
+    def test_irq_only_raw_mutations_ignore_original_command_text(self):
+        cases = [
+            (0x171c, branch(0x171c, 0x1804, 0xea000000), 'exact guarded hook'),
+            (0x171c, branch(0x171c, 0x1800, 0xeb000000), 'unconditional B'),
+            (0x171c, branch(0x171c, 0x1800, 0x1a000000), 'unconditional B'),
+            (0x1800, 0xe59f7018, 'PC-relative word LDR'),
+            (0x1800, 0xe5bf8018, 'PC-relative word LDR'),
+            (0x1820, 0x2004, 'actual guard state'),
+            (0x1804, 0xe5989004, 'banked r9'),
+            (0x1804, 0xe5980000, 'banked r9'),
+            (0x1808, 0xe3590001, 'compare zero'),
+            (0x1808, 0x13590000, 'compare zero'),
+            (0x180c, branch(0x180c, 0x1840, 0x0a000000), 'must be BNE'),
+            (0x180c, branch(0x180c, 0x1840, 0x1b000000), 'must be BNE'),
+            (0x180c, branch(0x180c, 0x1844, 0x1a000000), 'exact fail-stop'),
+            (0x1810, 0xe59f100c, 'PC-relative word LDR'),
+            (0x1824, 0x2084, 'message differs'),
+            (0x1814, branch(0x1814, 0x1904, 0xea000000), 'misses fatal common'),
+            (0x1814, branch(0x1814, 0x1900, 0xeb000000), 'unconditionally'),
+            (0x1840, 0xe3a09000, 'park opcodes'),
+            (0x1844, 0xe5880018, 'park opcodes'),
+            (0x1844, 0xe588901c, 'park opcodes'),
+            (0x1848, 0xe3049650, 'park opcodes'),
+            (0x184c, 0xe3449753, 'park opcodes'),
+            (0x1850, 0xe588902c, 'park opcodes'),
+            (0x1854, 0xe12fff1e, 'park opcodes'),
+            (0x1858, 0xe12fff1e, 'park opcodes'),
+            (0x1a28, 0xf10c00c0, 'irq_save opcodes'),
+            (0x1a00, 0xe3a00013, 'irq_save opcodes'),
+            (0x1a44, 0xe3c110c0, 'irq_restore opcodes'),
+            (0x1a48, 0xe20000c0, 'irq_restore opcodes'),
+            (0x1904, 0xe12fff1e, 'unexpected instruction'),
+            (0x190c, branch(0x190c, 0x1984, 0xeb000000), 'reboot/park'),
+            (0x1914, 0xe12fff1e, 'reboot/park'),
+        ]
+        self.assertGreaterEqual(len(cases), 20)
+        original = Fixture(irq_only=True)
+        for address, value, error in cases:
+            with self.subTest(address=hex(address), value=hex(value)):
+                fixture = copy.deepcopy(original)
+                fixture.word(address, value)
+                self.assertEqual((fixture.nm, fixture.dis), (original.nm, original.dis))
+                with self.assertRaisesRegex(ValueError, error):
+                    self.inspect_fixture(fixture)
+
+    def test_irq_only_configuration_and_symbol_contracts(self):
+        for value in ('1u', '0x1ULL', '1LLu'):
+            fixture = Fixture(irq_only=True)
+            fixture.define('GUARDED_IRQ_ONLY', value)
+            fixture.define('DWC3_TARGET_READS', value)
+            self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+        fixture = Fixture(irq_only=True)
+        fixture.config = fixture.config.replace('#define STAGE90_DWC3_TARGET_READS 1\n', '')
+        with self.assertRaisesRegex(ValueError, 'DWC3_TARGET_READS'):
+            self.inspect_fixture(fixture)
+        fixture = Fixture()
+        fixture.nm = fixture.nm.replace('00001040 00000004 T stage90_guarded_read32',
+                                        '00001040 T stage90_guarded_read32')
+        with self.assertRaisesRegex(ValueError, 'missing linked symbol'):
+            self.inspect_fixture(fixture)
+        for value in ('0', '2', '-1', 'IRQ_ALIAS'):
+            with self.subTest(value=value):
+                fixture = Fixture(irq_only=True)
+                fixture.define('GUARDED_IRQ_ONLY', value)
+                with self.assertRaisesRegex(ValueError, 'GUARDED_IRQ_ONLY'):
+                    self.inspect_fixture(fixture)
+        fixture = Fixture(irq_only=True)
+        fixture.config = fixture.config.replace('#define STAGE90_GUARDED_IRQ_ONLY 1\n', '')
+        with self.assertRaisesRegex(ValueError, 'GUARDED_IRQ_ONLY'):
+            self.inspect_fixture(fixture)
+        fixture = Fixture(irq_only=True)
+        fixture.nm = fixture.nm.replace('00001800 T stage90_guarded_fiq_hook_contract\n', '')
+        with self.assertRaisesRegex(ValueError, 'missing IRQ-only linked symbol'):
+            self.inspect_fixture(fixture)
+        for name, size in (('stage90_vectors', 28), ('stage90_guarded_fiq_park', 24),
+                           ('stage90_guarded_read32_irq_save', 48),
+                           ('stage90_guarded_read32_irq_restore', 24)):
+            with self.subTest(symbol=name):
+                fixture = Fixture(irq_only=True)
+                fixture.symbol(name, size=size)
+                with self.assertRaises(ValueError):
+                    self.inspect_fixture(fixture)
+
+    def test_strict_default_stays_strict_and_legacy_config_compatible(self):
+        fixture = Fixture()
+        fixture.config = fixture.config.replace('#define STAGE90_DWC3_TARGET_READS 1\n', '')
+        self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+        fixture.config += '#define STAGE90_GUARDED_IRQ_ONLY 0\n'
+        self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+        for value in ('1', '2', 'IRQ_ALIAS'):
+            fixture.define('GUARDED_IRQ_ONLY', value)
+            with self.assertRaisesRegex(ValueError, 'GUARDED_IRQ_ONLY'):
+                self.inspect_fixture(fixture)
+        fixture = Fixture(irq_only=True)
+        fixture.irq_only = False
+        with self.assertRaisesRegex(ValueError, 'GUARDED_IRQ_ONLY'):
+            self.inspect_fixture(fixture)
+
+    def test_recovery_only_positive_and_controller_gate_negatives(self):
+        original = Fixture(irq_only=True, recovery_only=True)
+        self.assertIn('PASS:', self.inspect_fixture(original)[0])
+        cases = [
+            ('wrong config', 'DWC3_TARGET_READS', lambda f: f.define('DWC3_TARGET_READS', '1')),
+            ('nonbool config', 'DWC3_TARGET_READS', lambda f: f.define('DWC3_TARGET_READS', '2')),
+            ('missing config', 'DWC3_TARGET_READS', lambda f: setattr(f, 'config', f.config.replace('#define STAGE90_DWC3_TARGET_READS 0\n', ''))),
+            ('identity call', 'controller/core', lambda f: setattr(f, 'dis', f.dis.replace('bl 1040 <stage90_guarded_read32>', 'bl 1500 <mi4_dwc3_identify>', 1))),
+            ('controller callback', 'controller/core', lambda f: setattr(f, 'dis', f.dis.replace('bl 1040 <stage90_guarded_read32>', 'bl 1040 <stage90_guarded_read32>\n  1408: eb000000 bl 1500 <dwc3_probe_read>', 1))),
+            ('third guarded call', 'exactly twice', lambda f: setattr(f, 'dis', f.dis.replace('bl 1040 <stage90_guarded_read32>', 'bl 1040 <stage90_guarded_read32>\n  1408: eb000000 bl 1040 <stage90_guarded_read32>', 1))),
+            ('inhibit marker absent', 'diagnostic', lambda f: setattr(f, 'payload', f.payload.replace(b'controller target reads inhibited', b'X'*len(b'controller target reads inhibited')))),
+        ]
+        for name, error, mutate in cases:
+            with self.subTest(case=name):
+                fixture = copy.deepcopy(original)
+                mutate(fixture)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.inspect_fixture(fixture)
+
+    def test_cli_modes_are_explicit(self):
+        required = ['--payload', 'p', '--entry', 'e', '--config', 'c']
+        for flags in ([], ['--irq-only'], ['--irq-only', '--recovery-only']):
+            with self.subTest(flags=flags), mock.patch.object(sys, 'argv', ['checker']+required+flags):
+                with mock.patch.object(CHECKER, 'inspect') as inspect:
+                    CHECKER.main()
+                    inspect.assert_called_once_with(Path('p'), Path('e'), Path('c'),
+                        irq_only='--irq-only' in flags, recovery_only='--recovery-only' in flags)
 
 
 class ElfReaderTests(unittest.TestCase):

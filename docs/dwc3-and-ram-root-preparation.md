@@ -107,10 +107,28 @@ must match the dedicated single 32-bit LDR; only documented synchronous read
 fault classes are recoverable. Before arming any target load, the wrapper reads
 back actual CPSR after requesting IRQ/FIQ masking; if the required state did not
 take effect, it restores the original masks and returns a nonzero status without
-reading the target or changing the output. The failure label returns nonzero without storing
-an output. Unsupported active faults retain a RAM breadcrumb and park rather than
+reading the target or changing the output. The failure label returns nonzero
+without storing an output. Unsupported active faults retain a RAM breadcrumb and park rather than
 fall through to the existing generic instruction-skip handler. This is not an
 SMP, Thumb, XNU, arbitrary-pointer or universal crash-recovery API.
+
+`STAGE90_GUARDED_IRQ_ONLY=1` is a separately reviewed, default-OFF profile for the
+measured environment where F cannot be set. It requests/restores only I, requires
+actual post-I=1 and unchanged per-call F/A and ARM/SVC/LE context, and compares
+fault SPSR M/T/E/J/I/F with the immutable post-mask snapshot. Exact PC/DFAR and
+supported read-fault requirements remain. It also requires a linked FIQ hook:
+ANY nonzero active branches using banked r8/r9 to a RAM-only, nonreturning park
+before the old logger. Output may already be written if FIQ arrives after commit;
+no API success returns from that park. Neither secure routing nor bus completion
+is proved. Default-OFF instruction sections were checked against the strict baseline.
+
+`STAGE90_DWC3_TARGET_READS` now defaults to **0**. A recovery-only profile completes
+normal RAM and intentional translation-fault selftests, logs exact fault context,
+then returns before live watchdog/controller target reads. The real-image checker
+requires exactly those two guarded call sites and no identity-core call. Its
+explicit `--irq-only --recovery-only` contract is distinct from identification.
+Hardware recovery evidence is required before a separate TARGET_READS=1 profile;
+there is no automatic fallback or enablement.
 
 The opt-in `src/dwc3_probe.c` checks the original vectors, actual identity table,
 MMU/cache/TEX-remapping state, strongly-ordered mappings and existing recovery
@@ -134,7 +152,38 @@ OFF, pins inputs/outputs and requires actual linked opcode/configuration checks.
 The checker tests use synthetic ELF bytes; the capture tests use synthetic logs.
 They are not evidence that an unbuilt profile is usable. Real logs remain private.
 
+## Offline TRB preparation
+
+`src/dwc3_trb.{c,h}` is an original DMA32-profile byte codec, not a queue or DMA
+adapter. It validates widened length/type/flags, checked caller-declared bus spans,
+SETUP=8 and STATUS=0, and permits legitimate zero packets and address zero. Its
+16-byte LE prepared image always has HWO=0; unsupported CHN/PCM1/iso/link fields
+are rejected. The caller still proves ownership, translation, TRB alignment,
+coherency and lifetime. Decoding preserves all 16 status nibbles and does not
+interpret HWO-clear or OK as USB completion.
+
+Strict Clang and GNU GCC plus ASan/UBSan each passed 1,505,925 checks with 100,000
+randomized TRBs. Six independently compiled unsafe mutants were rejected; 20
+supplier numerical contracts, the four-word layout and 11 local assertions were
+checked. The parent also compiled the codec with ARM GCC. Frozen inputs are used
+for compilation and mutants and rechecked afterward, including failure paths.
+None of this publishes DMA or proves a hardware transfer.
+
+```sh
+python3 tools/test_dwc3_trb.py --cc clang --sanitize
+python3 tools/test_dwc3_trb.py --cc gcc --sanitize
+```
+
 ## Hardware boundary
+
+The EP0 planner commits **software** address/configuration after matching STATUS
+completion. This is not a hardware DCFG.DEVADDR timing rule. The existing platform
+source handles the DCFG address field during SET_ADDRESS, before status scheduling
+(`external/android_kernel_xiaomi_cancro/drivers/usb/dwc3/ep0.c:501–527`). A future
+original adapter must distinguish controller-address staging from software commit
+and reconcile cancelled requests/reset; the source alone does not prove silicon
+internal latch timing. Non-address hardware preparation must be reversible and
+complete before offering STATUS.
 
 The actual recovered phone gadget is DWC3, not the separately implemented legacy
 CI controller. Changing a CI base address cannot port its QH/dTD driver to DWC3.

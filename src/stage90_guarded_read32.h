@@ -2,6 +2,8 @@
 #define STAGE90_GUARDED_READ32_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include "stage90_guarded_profile.h"
 
 /* Single CPU/thread, pre-XNU only. Not a whitelist or a bus timeout.
  * Parent owns address allowlist, live watchdog, mapping and trusted RAM checks.
@@ -41,6 +43,15 @@ struct stage90_guarded_read32_state {
     uint32_t cpsr_before_mask;
     uint32_t cpsr_after_mask;
 };
+
+_Static_assert(offsetof(struct stage90_guarded_read32_state, active) == STAGE90_GUARD_ACTIVE_OFFSET, "FIQ active offset");
+_Static_assert(offsetof(struct stage90_guarded_read32_state, status) == STAGE90_GUARD_STATUS_OFFSET, "FIQ status offset");
+_Static_assert(offsetof(struct stage90_guarded_read32_state, breadcrumb) == STAGE90_GUARD_BREADCRUMB_OFFSET, "FIQ breadcrumb offset");
+_Static_assert(STAGE90_GUARDED_UNSUPPORTED_STATUS == STAGE90_GUARD_UNSUPPORTED, "FIQ status value");
+#if STAGE90_GUARDED_IRQ_ONLY
+/* Link obligation, NOT runtime proof of the installed VBAR/routing/opcodes. */
+extern const unsigned char stage90_guarded_fiq_hook_contract[];
+#endif
 
 extern volatile struct stage90_guarded_read32_state stage90_guarded_read32_state;
 int stage90_guarded_read32(uint32_t address, uint32_t *out);

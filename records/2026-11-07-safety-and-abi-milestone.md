@@ -179,6 +179,62 @@ cases cover missing I, missing F and neither effective, all with zero target-loa
 calls. A separate diagnostic build/boot must measure that state before any further
 policy or controller changes. No automatic retry or gate relaxation is used.
 
+That strict diagnostic subsequently completed all five stages, 27 acceptance
+commands and 71 linked checks. Its image SHA256 was:
+
+`cf2c63501e2ed9c69125be300cc263f3ecc7cbef6d499723ae1d4b1d2987ca98`
+
+One RAM boot measured **CPSR `0x60000113` → `0x60000193`**: I became 1, F remained
+0, and A was preserved. The guard returned status 6 before activation or any target
+load, safely skipped the probe, and Android recovered. No intentional fault or
+new watchdog/clock/DWC3 target read occurred. This confirms the current masking
+limitation; it still does not reconstruct the original fault's uncaptured SPSR.
+
+A separately reviewed default-OFF IRQ-only profile preserves per-call F/A and
+requires actual I=1 plus stable ARM/SVC/LE state. It retains exact fault PC/DFAR/
+read-DFSR checks and matching saved-SPSR context, and adds a banked-register active
+FIQ path to a two-known-RAM-store, nonreturning park before logging. Host GCC/Clang,
+sanitizer, lifecycle and opcode tests are not proof of asynchronous FIQ delivery.
+The successor first verifies **RAM and intentional-fault recovery only**, with
+controller target reads explicitly inhibited. No controller initialization,
+security-routing change, or experimental medium write is authorized by this work.
+
+The recovery-only successor completed all five build stages, 29 acceptance
+commands and 104 actual linked checks. Its image SHA256 was:
+
+`6e4365522002e9018b5cb5f0290fcae8ae7fce0f64bcb200f7b5b14798686799`
+
+A single bounded RAM boot then passed both normal RAM and exact intentional-fault
+recovery. Actual evidence: result 2; DFSR `0x00000005`; DFAR `0xdeadc000`; observed
+and expected fault PC both `0x0000c734`; SPSR `0x60000193`; count 1; active 0;
+status 2; output still `0xa55a12ed`. The explicit final marker inhibited all new
+live-watchdog/controller target reads, and Android recovered. This proves the
+narrow synchronous ARM recovery contract, **not asynchronous FIQ delivery or USB**.
+
+Only after that hardware gate was a separately validated identification payload
+prepared. The exact-transition tool pins 705 recorded compiled sources, every
+prior declared input/kernel output and four byte-identical OLD entry artifacts;
+only TARGET_READS=0→1 and the matching final checker mode may change. It performs
+a payload rebuild, not a fresh kernel/entry compilation. All other 28 acceptance
+commands remain identical. Its synthetic safeguards passed 42 tests independently
+on macOS and Linux; historical source manifests still do not prove a transitive
+header dependency closure. Controller identity remains a separate real-boot gate.
+
+The subsequent identification payload passed 29 checks and 104 linked checks;
+its image SHA256 was:
+
+`64c9ede5ab8784a96c758abffdc214b6e989bcc0e05bbae8e62237ef4e924db7`
+
+One bounded RAM boot passed normal/fault guard selftests again and confirmed the
+live watchdog advancing. The first clock read succeeded at `0xfc400108` with
+`0x80000000`. The strict core stopped with CLOCK_BLOCKED, one completed read and
+zero valid DWC3 registers; Android recovered. The supplier contract identifies
+this as the SYS_NOC_USB3_AXI branch. **No other clock/reset/root/core register was
+read and no clock/controller register was written.** This is a measured clock
+prerequisite blocker, not DWC3 identification, enumeration or transport. A separate
+GCC-only snapshot and dependency review must precede any clock enablement; the
+existing identification early-stop is not bypassed.
+
 ### Root-system provenance and capacity
 
 The current 512 KiB RAM root contains only launchd and dyld, with no dependency

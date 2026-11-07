@@ -16,7 +16,8 @@ def main():
     args = parser.parse_args()
     root = args.repo_root.resolve()
     paths = [root/'src/stage90_guarded_read32.h', root/'src/stage90_guarded_read32.c',
-             root/'tools/fixtures/dwc3_guarded_read32_harness.c']
+             root/'tools/fixtures/dwc3_guarded_read32_harness.c',
+             root/'src/stage90_guarded_profile.h']
     snapshots = [p.read_bytes() for p in paths]
     source = snapshots[1].decode()
     cc = shlex.split(args.cc)
@@ -26,6 +27,7 @@ def main():
         temp = Path(name)
         (temp/'stage90_guarded_read32.h').write_bytes(snapshots[0])
         (temp/'harness.c').write_bytes(snapshots[2])
+        (temp/'stage90_guarded_profile.h').write_bytes(snapshots[3])
         def run(label, text, negative=False):
             candidate = temp/(label+'.c')
             candidate.write_text(text)

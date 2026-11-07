@@ -6,6 +6,7 @@
  * silent hangs.
  */
 
+#include "stage90_guarded_profile.h"
 .syntax unified
 .cpu cortex-a15
 .arch armv7-a
@@ -91,8 +92,35 @@ vector_irq:
     subs pc, lr, #0
 
 vector_fiq:
+#if STAGE90_GUARDED_IRQ_ONLY && defined(STAGE90_DWC3_READONLY)
+.global stage90_guarded_fiq_hook_contract
+stage90_guarded_fiq_hook_contract:
+    /* FIQ banked r8-r14 only; no stack, C, MMIO or shared r0-r7 first. */
+    ldr r8, =stage90_guarded_read32_state
+    ldr r9, [r8, #STAGE90_GUARD_ACTIVE_OFFSET]
+    cmp r9, #0
+    bne stage90_guarded_fiq_park /* ANY nonzero active, including corruption */
+#endif
     ldr r0, =msg_fiq
     b   stage90_exception_common
+
+#if STAGE90_GUARDED_IRQ_ONLY && defined(STAGE90_DWC3_READONLY)
+.global stage90_guarded_fiq_park
+.type stage90_guarded_fiq_park, %function
+stage90_guarded_fiq_park:
+    /* r8 is trusted state RAM from prefix. Keep active nonzero forever.
+     * RAM failure here can recursively abort; this is not universal containment.
+     */
+    mov r9, #STAGE90_GUARD_UNSUPPORTED
+    str r9, [r8, #STAGE90_GUARD_STATUS_OFFSET]
+    movw r9, #(STAGE90_GUARD_FIQ_BREADCRUMB & 0xffff)
+    movt r9, #(STAGE90_GUARD_FIQ_BREADCRUMB >> 16)
+    str r9, [r8, #STAGE90_GUARD_BREADCRUMB_OFFSET]
+.Lguard_fiq_park:
+    wfe
+    b .Lguard_fiq_park
+.size stage90_guarded_fiq_park, . - stage90_guarded_fiq_park
+#endif
 
 /*
  * r0 = message. Preserve enough state to print the exception type plus LR/CPSR.

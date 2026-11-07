@@ -4,6 +4,12 @@
 #ifndef STAGE90_DWC3_READONLY
 #define STAGE90_DWC3_READONLY 0
 #endif
+#ifndef STAGE90_DWC3_TARGET_READS
+#define STAGE90_DWC3_TARGET_READS 0
+#endif
+#if STAGE90_DWC3_TARGET_READS != 0 && STAGE90_DWC3_TARGET_READS != 1
+#error STAGE90_DWC3_TARGET_READS_must_be_zero_or_one
+#endif
 #if STAGE90_DWC3_READONLY != 0 && STAGE90_DWC3_READONLY != 1
 #error STAGE90_DWC3_READONLY_must_be_zero_or_one
 #endif
@@ -66,6 +72,14 @@ static int dwc3_probe_guard_selftest(uint32_t *table)
     xnu_log_kv32("dwc3_ro_guard_fault_dfsr", stage90_guarded_read32_state.fault_dfsr);
     xnu_log_kv32("dwc3_ro_guard_fault_dfar", stage90_guarded_read32_state.fault_dfar);
     xnu_log_kv32("dwc3_ro_guard_fault_pc", stage90_guarded_read32_state.observed_pc);
+    xnu_log_kv32("dwc3_ro_guard_fault_spsr", stage90_guarded_read32_state.observed_spsr);
+    xnu_log_kv32("dwc3_ro_guard_fault_count", stage90_guarded_read32_state.fault_count);
+    xnu_log_kv32("dwc3_ro_guard_fault_active", stage90_guarded_read32_state.active);
+    xnu_log_kv32("dwc3_ro_guard_fault_status", stage90_guarded_read32_state.status);
+    xnu_log_kv32("dwc3_ro_guard_fault_output", sample);
+    xnu_log_kv32("dwc3_ro_guard_fault_expected_pc", (uint32_t)(uintptr_t)stage90_guarded_read32_fault);
+    xnu_log_kv32("dwc3_ro_guard_fault_cpsr_before", stage90_guarded_read32_state.cpsr_before_mask);
+    xnu_log_kv32("dwc3_ro_guard_fault_cpsr_after", stage90_guarded_read32_state.cpsr_after_mask);
     if (result != STAGE90_GUARDED_FAULT || sample != UINT32_C(0xa55a12ed) ||
         stage90_guarded_read32_state.active != 0u ||
         stage90_guarded_read32_state.status != STAGE90_GUARDED_FAULT ||
@@ -74,7 +88,15 @@ static int dwc3_probe_guard_selftest(uint32_t *table)
         stage90_guarded_read32_state.fault_dfar != unmapped ||
         (stage90_guarded_read32_state.fault_dfsr & UINT32_C(0x40f)) != 5u ||
         stage90_guarded_read32_state.observed_pc !=
-            (uint32_t)(uintptr_t)stage90_guarded_read32_fault) {
+            (uint32_t)(uintptr_t)stage90_guarded_read32_fault
+#if STAGE90_GUARDED_IRQ_ONLY
+        || (stage90_guarded_read32_state.cpsr_after_mask & UINT32_C(0x010002bf)) != UINT32_C(0x93)
+        || ((stage90_guarded_read32_state.cpsr_before_mask ^
+             stage90_guarded_read32_state.cpsr_after_mask) & UINT32_C(0x0100037f)) != 0u
+        || ((stage90_guarded_read32_state.observed_spsr ^
+             stage90_guarded_read32_state.cpsr_after_mask) & STAGE90_GUARD_STABLE_CPSR) != 0u
+#endif
+        ) {
         xnu_log_puts("dwc3_ro skipped: guard translation-fault selftest failed\n");
         return 0;
     }
@@ -144,6 +166,10 @@ void stage90_dwc3_readonly_probe(void)
         return;
     }
     if (!dwc3_probe_guard_selftest(table)) return;
+#if !STAGE90_DWC3_TARGET_READS
+    xnu_log_puts("dwc3_ro recovery verified; controller target reads inhibited\n");
+    return;
+#endif
     /* Known watchdog reads also use the guarded load; no new watchdog writes. */
     xnu_log_kv32("dwc3_ro_watchdog_read_address", UINT32_C(0xf9017008));
     if (stage90_guarded_read32(UINT32_C(0xf9017008), &enable) ||

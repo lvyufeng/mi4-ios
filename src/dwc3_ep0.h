@@ -89,8 +89,10 @@ struct dwc3_ep0_plan dwc3_ep0_setup(struct dwc3_ep0 *ep,
  */
 struct dwc3_ep0_plan dwc3_ep0_data_complete(struct dwc3_ep0 *ep,
     uint64_t transaction, enum dwc3_ep0_direction direction, bool success);
-/* Only successful matching STATUS completion commits pending address/config.
+/* Only successful matching STATUS completion commits pending SOFTWARE address/config.
  * Returns true only for that successful completion; false never commits.
+ * This does NOT specify when hardware DCFG.DEVADDR is staged or latched; the
+ * controller adapter needs its own request/status/reset reconciliation contract.
  * Configuration here is software intent, NOT endpoint readiness or enablement.
  */
 bool dwc3_ep0_status_complete(struct dwc3_ep0 *ep, uint64_t transaction,

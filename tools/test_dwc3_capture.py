@@ -77,6 +77,50 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             CAPTURE.analyze(text+'\n'+value('dwc3_ro_guard_cpsr_after',0xd3))
 
+    def test_recovery_only_exact_fault_evidence(self):
+        lines = console().splitlines()
+        lines = [line for line in lines if not line.startswith(('dwc3_ro_watchdog_', 'dwc3_ro_read_',
+            'dwc3_ro_status=', 'dwc3_ro_completed_reads=', 'dwc3_ro_valid_',
+            'dwc3_ro_failed_slot=', 'dwc3_ro_elapsed_us=')) and line != CAPTURE.FINISH]
+        lines = [line.replace('dwc3_ro_guard_cpsr_after=0x000000d3',
+                               'dwc3_ro_guard_cpsr_after=0x00000093') for line in lines]
+        for key, number in [('spsr',0x60000193),('count',1),('active',0),('status',2),
+            ('output',0xa55a12ed),('expected_pc',0x100c),('cpsr_before',0x13),('cpsr_after',0x93)]:
+            lines.append(value('dwc3_ro_guard_fault_'+key,number))
+        lines.append(CAPTURE.RECOVERY)
+        text='\n'.join(lines)
+        report=CAPTURE.analyze(text, irq_only=True, recovery_only=True)
+        self.assertTrue(report['guard_selftest_passed'])
+        self.assertFalse(report['identification_passed'])
+        self.assertTrue(report['controller_target_reads_inhibited'])
+        for old,new in [('fault_spsr=0x60000193','fault_spsr=0x600001d3'),
+            ('fault_count=0x00000001','fault_count=0x00000000'),
+            ('fault_active=0x00000000','fault_active=0x00000001'),
+            ('fault_status=0x00000002','fault_status=0x00000003'),
+            ('fault_output=0xa55a12ed','fault_output=0x00000000'),
+            ('fault_expected_pc=0x0000100c','fault_expected_pc=0x00001010'),
+            ('fault_cpsr_after=0x00000093','fault_cpsr_after=0x00000013'),
+            ('fault_cpsr_before=0x00000013','fault_cpsr_before=0x00000053')]:
+            with self.subTest(mutation=old):
+                self.assertIn(old,text)
+                with self.assertRaises(ValueError):
+                    CAPTURE.analyze(text.replace(old,new), True, True)
+        for extra in ('\n'+value('dwc3_ro_read_index',1),
+                       '\n'+value('dwc3_ro_status',0),
+                       '\n'+value('dwc3_ro_watchdog_read_address',0xf9017008)):
+            with self.assertRaises(ValueError):
+                CAPTURE.analyze(text+extra,True,True)
+        for word in (0x805, 0x205, 0x80000005):
+            with self.assertRaises(ValueError):
+                CAPTURE.analyze(text.replace('fault_dfsr=0x00000005',
+                    'fault_dfsr=0x%08x' % word),True,True)
+        with self.assertRaises(ValueError):
+            CAPTURE.analyze(text+'\ndwc3_ro skipped: guard RAM selftest failed',True,True)
+        with self.assertRaises(ValueError):
+            CAPTURE.analyze(text,False,True)
+        with self.assertRaises(ValueError):
+            CAPTURE.analyze(text,True,False)
+
     def test_inconsistent_success_evidence(self):
         original = console()
         mutations = [

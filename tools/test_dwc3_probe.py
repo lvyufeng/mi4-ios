@@ -43,7 +43,9 @@ HARNESS = r'''
 volatile struct stage90_guarded_read32_state stage90_guarded_read32_state;
 const unsigned char stage90_guarded_read32_fault[4] __attribute__((aligned(4)))={1,2,3,4};
 const unsigned char stage90_guarded_read32_recovery[4] __attribute__((aligned(4)))={5,6,7,8};
-static struct stage90_guarded_read32_state fault_evidence;
+static struct stage90_guarded_read32_state ram_evidence, fault_evidence;
+static uint32_t saved_f;
+static int irq_case=-1;
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr,"CHECK line %d: %s\n",__LINE__,#x); exit(1); } } while (0)
 static uint32_t l1[4096] __attribute__((aligned(16384)));
@@ -87,7 +89,10 @@ void xnu_log_kv32(const char *key, uint32_t value)
         "dwc3_ro_failed_slot","dwc3_ro_elapsed_us","dwc3_ro_guard_ram_address",
         "dwc3_ro_guard_fault_address","dwc3_ro_guard_fault_result","dwc3_ro_guard_fault_dfsr",
         "dwc3_ro_guard_fault_dfar","dwc3_ro_guard_fault_pc","dwc3_ro_guard_ram_result",
-        "dwc3_ro_guard_cpsr_before","dwc3_ro_guard_cpsr_after"};
+        "dwc3_ro_guard_cpsr_before","dwc3_ro_guard_cpsr_after","dwc3_ro_guard_fault_spsr",
+        "dwc3_ro_guard_fault_count","dwc3_ro_guard_fault_active","dwc3_ro_guard_fault_status",
+        "dwc3_ro_guard_fault_output","dwc3_ro_guard_fault_expected_pc",
+        "dwc3_ro_guard_fault_cpsr_before","dwc3_ro_guard_fault_cpsr_after"};
     unsigned i;
     for(i=0;i<sizeof(keys)/sizeof(keys[0]);++i) if(!strcmp(key,keys[i])) break;
     CHECK(i<sizeof(keys)/sizeof(keys[0]) && effects.logs<128u);
@@ -115,17 +120,20 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
         CHECK(effects.logs>0u && !strcmp(logs[effects.logs-1u].key,"dwc3_ro_guard_ram_address"));
         CHECK(logs[effects.logs-1u].value==address && *out==0xa55a12edu);
         golden[0]=address;
-        stage90_guarded_read32_state.cpsr_before_mask=0x13u;
-        stage90_guarded_read32_state.cpsr_after_mask=0xd3u;
+        ram_evidence=(struct stage90_guarded_read32_state){0};
+        ram_evidence.cpsr_before_mask=0x13u|saved_f;
+        ram_evidence.cpsr_after_mask=ram_evidence.cpsr_before_mask|
+            (STAGE90_GUARDED_IRQ_ONLY ? 0x80u : 0xc0u);
+        ram_evidence.status=guard_case==1 ? STAGE90_GUARDED_FAULT : STAGE90_GUARDED_OK;
         if(guard_case>=16) {
             static const uint32_t missing[]={0x40u,0x80u,0xc0u};
-            stage90_guarded_read32_state.cpsr_after_mask &= ~missing[guard_case-16];
-            stage90_guarded_read32_state.status=STAGE90_GUARDED_BAD_CONTEXT;
-            return STAGE90_GUARDED_BAD_CONTEXT;
+            ram_evidence.cpsr_after_mask &= ~missing[guard_case-16];
+            ram_evidence.status=STAGE90_GUARDED_BAD_CONTEXT;
         }
+        stage90_guarded_read32_state=ram_evidence;
+        if(guard_case>=16) return STAGE90_GUARDED_BAD_CONTEXT;
         if(guard_case==1) return -7;
         *out=guard_case==2 ? 0x47524451u : 0x47524450u;
-        stage90_guarded_read32_state.status=STAGE90_GUARDED_OK;
         return 0;
     }
     CHECK(address==golden[i]);
@@ -136,6 +144,21 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
         state.fault_dfar=address; state.fault_dfsr=5u;
         state.fault_pc=state.observed_pc=(uint32_t)(uintptr_t)stage90_guarded_read32_fault;
         state.recovery_pc=(uint32_t)(uintptr_t)stage90_guarded_read32_recovery;
+        state.cpsr_before_mask=0x13u|saved_f;
+        state.cpsr_after_mask=state.cpsr_before_mask|(STAGE90_GUARDED_IRQ_ONLY ? 0x80u : 0xc0u);
+        state.observed_spsr=state.cpsr_after_mask;
+        if(irq_case>=0) {
+            static const unsigned bits[]={7u,6u,0u,5u,9u,24u};
+            CHECK(STAGE90_GUARDED_IRQ_ONLY && irq_case<16);
+            if(irq_case<6) state.observed_spsr^=1u<<bits[irq_case];
+            else if(irq_case<11) {
+                static const unsigned post_bits[]={7u,0u,5u,9u,24u};
+                state.cpsr_after_mask^=1u<<post_bits[irq_case-6];
+            } else if(irq_case<13) state.cpsr_before_mask^=irq_case==11 ? 0x100u : 0x40u;
+            else if(irq_case==13) state.observed_spsr^=0xf8000000u; /* NZCV/Q ignored. */
+            else if(irq_case==14) state.observed_spsr^=0x100u; /* Saved A is not stable-mask data. */
+            else state.cpsr_before_mask|=0xf0000000u; /* Flag transitions are permitted. */
+        }
         switch(guard_case) {
         case 4:*out=0xdeadbeefu;break; case 5:state.status=STAGE90_GUARDED_OK;break;
         case 6:state.fault_count=0u;break; case 7:state.fault_count=2u;break;
@@ -189,7 +212,12 @@ int main(int argc, char **argv)
     l1[0xfc4]=0xfc400000u|STAGE90_PMAP_DESC_SECTION_SO;
     wd.enabled=wd.counter_running=wd.countdown_plausible=wd.readback_ok=1u; wd.bark_ticks=100000u;
     if(!strcmp(name,"callback")) { callback_checks(); printf("PASS %u\n",checks); return 0; }
-    if(!strcmp(name,"cpu")) {
+    if(!strcmp(name,"fiq")) {
+        CHECK(p<2u); saved_f=p ? 0x40u : 0u; fake_cpsr|=saved_f;
+    } else if(!strcmp(name,"irq-state")) {
+        CHECK(STAGE90_GUARDED_IRQ_ONLY && p<16u); irq_case=(int)p;
+        if(p<13u) { expected=2u;summary=delays=0u;skip="guard translation-fault selftest failed"; }
+    } else if(!strcmp(name,"cpu")) {
         static const unsigned cpsr_bits[]={0,1,2,3,4,5,9,24}, sctlr_bits[]={0,2,13,25,28,30};
         CHECK(p<14u); if(p<8u) fake_cpsr^=1u<<cpsr_bits[p]; else fake_sctlr^=1u<<sctlr_bits[p-8u];
         skip="CPU/MMU/vector precondition";
@@ -246,21 +274,38 @@ int main(int argc, char **argv)
     } else if(!strcmp(name,"deadline")) {
         step=10001u;expected=5u;completed=clocks=regs=0u;slot=0u;status=MI4_DWC3_IDENTIFY_READ_FAILED;
     } else CHECK(!strcmp(name,"golden"));
-    if(skip && guard_case<0) { expected=summary=delays=0u; }
+    if(skip && guard_case<0 && irq_case<0) { expected=summary=delays=0u; }
+#if !STAGE90_DWC3_TARGET_READS
+    if(!skip) { expected=2u;summary=delays=0u; }
+#endif
     stage90_dwc3_readonly_probe();
     CHECK(effects.reads==expected && effects.delays==delays);
     for(i=0;i<expected;++i) CHECK(seen[i]==golden[i]);
     CHECK(strstr(text,"DWC3 read-only identity probe;")!=NULL);
     if(skip) CHECK(strstr(text,skip)!=NULL);
     CHECK((strstr(text,"dwc3_ro finished;")!=NULL)==summary);
-    CHECK((strstr(text,"guard selftest passed:")!=NULL)==(expected>=3u));
-    if(expected>0u) kv("dwc3_ro_guard_ram_address",golden[0]);
+    CHECK((strstr(text,"guard selftest passed:")!=NULL)==(!skip && expected>=2u));
+    CHECK((strstr(text,"controller target reads inhibited")!=NULL)==(!STAGE90_DWC3_TARGET_READS && !skip));
+    if(expected>0u) {
+        kv("dwc3_ro_guard_ram_address",golden[0]);
+        kv("dwc3_ro_guard_ram_result",guard_case>=16 ? STAGE90_GUARDED_BAD_CONTEXT : guard_case==1 ? (uint32_t)-7 : 0u);
+        kv("dwc3_ro_guard_cpsr_before",ram_evidence.cpsr_before_mask);
+        kv("dwc3_ro_guard_cpsr_after",ram_evidence.cpsr_after_mask);
+    }
     if(expected>1u) {
         kv("dwc3_ro_guard_fault_address",0xdeadc000u);
         kv("dwc3_ro_guard_fault_result",guard_case==3 ? 0u : guard_case==15 ? (uint32_t)-7 : STAGE90_GUARDED_FAULT);
         kv("dwc3_ro_guard_fault_dfsr",fault_evidence.fault_dfsr);
         kv("dwc3_ro_guard_fault_dfar",fault_evidence.fault_dfar);
         kv("dwc3_ro_guard_fault_pc",fault_evidence.observed_pc);
+        kv("dwc3_ro_guard_fault_spsr",fault_evidence.observed_spsr);
+        kv("dwc3_ro_guard_fault_count",fault_evidence.fault_count);
+        kv("dwc3_ro_guard_fault_active",fault_evidence.active);
+        kv("dwc3_ro_guard_fault_status",fault_evidence.status);
+        kv("dwc3_ro_guard_fault_output",guard_case==4 ? 0xdeadbeefu : 0xa55a12edu);
+        kv("dwc3_ro_guard_fault_expected_pc",(uint32_t)(uintptr_t)stage90_guarded_read32_fault);
+        kv("dwc3_ro_guard_fault_cpsr_before",fault_evidence.cpsr_before_mask);
+        kv("dwc3_ro_guard_fault_cpsr_after",fault_evidence.cpsr_after_mask);
     }
     for(i=0;i<effects.logs;++i) {
         if(!strcmp(logs[i].key,"dwc3_ro_read_index")) CHECK(logs[i].value==++read_logs);
@@ -338,7 +383,8 @@ def main():
     parser.add_argument('--sanitize', action='store_true', help='enable host ASan and UBSan')
     args = parser.parse_args(); root = args.repo_root.resolve(); cc = shlex.split(args.cc)
     if not cc: raise ValueError('empty compiler command')
-    names = ['dwc3_probe.c', 'dwc3_identify.c', 'dwc3_identify.h', 'stage90.h', 'stage90_guarded_read32.h']
+    names = ['dwc3_probe.c', 'dwc3_identify.c', 'dwc3_identify.h', 'stage90.h',
+             'stage90_guarded_read32.h', 'stage90_guarded_profile.h']
     files = [root/'src'/name for name in names]; snapshots = [p.read_bytes() for p in files]
     source = cpu_fixture(snapshots[0].decode())
     cases = [('golden', 0), ('callback', 0), ('en-off', 0), ('reset', 0), ('id', 0), ('deadline', 0)]
@@ -348,14 +394,17 @@ def main():
     with tempfile.TemporaryDirectory(prefix='mi4-dwc3-probe-') as tmp:
         directory = Path(tmp)
         for name, content in [('stage90.h', stage90_stub(snapshots[3].decode())),
-                              ('stage90_guarded_read32.h', snapshots[4].decode()), ('harness.c', HARNESS),
+                              ('stage90_guarded_read32.h', snapshots[4].decode()),
+                              ('stage90_guarded_profile.h', snapshots[5].decode()), ('harness.c', HARNESS),
                               ('dwc3_identify.c', snapshots[1].decode()), ('dwc3_identify.h', snapshots[2].decode())]:
             (directory/name).write_text(content)
-        def build(label, probe, enabled):
+        def build(label, probe, enabled=1, target=1, irq=0):
             (directory/'actual-probe.c').write_text(probe)
             binary = directory/label
             flags = ['-std=c11', '-O0', '-Wall', '-Wextra', '-Werror', '-pedantic',
-                     '-DSTAGE90_DWC3_READONLY='+str(enabled), '-I', str(directory)]
+                     '-DSTAGE90_DWC3_READONLY='+str(enabled),
+                     '-DSTAGE90_DWC3_TARGET_READS='+str(target),
+                     '-DSTAGE90_GUARDED_IRQ_ONLY='+str(irq), '-I', str(directory)]
             if args.sanitize: flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
             result = command(cc+flags+[str(directory/'harness.c'), str(directory/'dwc3_identify.c'), '-o', str(binary)])
             if result.returncode: raise ValueError(label+' compile failed:\n'+result.stderr)
@@ -366,22 +415,38 @@ def main():
             match = re.fullmatch(r'PASS (\d+)\n', result.stdout)
             if not match: raise ValueError('unexpected harness output: '+result.stdout)
             return int(match[1])
-        actual = build('actual-on', source, 1)
-        checks = sum(run(actual, case) for case in cases)
+        irq_cases = [('irq-state', i) for i in range(16)]
+        fiq_cases = [('fiq', 0), ('fiq', 1)]
+        recovery_cases = [('golden', 0)]+fiq_cases+irq_cases
+        recovery_cases += [case for case in cases if case[0] in
+                           ('cpu', 'precondition', 'mapping', 'watchdog', 'selftest')]
+        checks = total = 0
+        profiles = [('strict-target', 1, 0, cases+fiq_cases),
+                    ('irq-target', 1, 1, cases+fiq_cases+irq_cases),
+                    ('irq-recovery-only', 0, 1, recovery_cases)]
+        for label, target, irq, selections in profiles:
+            binary = build(label, source, target=target, irq=irq)
+            assertions = sum(run(binary, case) for case in selections)
+            checks += assertions; total += len(selections)
+            print('PASS profile:',label,len(selections),'cases,',assertions,'C assertions')
         # OFF compiles the original, entirely untouched source (no CPU seam needed).
-        checks += run(build('actual-off', snapshots[0].decode(), 0), ('off', 0))
-        print('PASS:', len(cases)+1, 'fresh-process ON/OFF cases,', checks, 'C assertions')
+        checks += run(build('actual-off', snapshots[0].decode(), enabled=0, target=0), ('off', 0))
+        print('PASS:', total+1, 'fresh-process profile/OFF cases,', checks, 'C assertions')
         gate = ('if (!watchdog || !watchdog->enabled || !watchdog->counter_running ||\n'
                 '        !watchdog->countdown_plausible || !watchdog->readback_ok ||\n'
                 '        watchdog->bite_truncated || !stage90_deadman_armed())')
-        controls = [('watchdog-gate', gate, 'if (!watchdog)', ('watchdog',1)),
+        spsr_check = ('((stage90_guarded_read32_state.observed_spsr ^\n'
+                      '             stage90_guarded_read32_state.cpsr_after_mask) & STAGE90_GUARD_STABLE_CPSR)')
+        controls = [('watchdog-gate', gate, 'if (!watchdog)', ('watchdog',1), 1, 0),
                     ('address-whitelist', '!dwc3_probe_address_allowed(address)',
-                     '(0 && !dwc3_probe_address_allowed(address))', ('callback',0)),
-                    ('one-shot', 'if (attempted) return;', 'if (attempted > 1u) return;', ('golden',0)),
+                     '(0 && !dwc3_probe_address_allowed(address))', ('callback',0), 1, 0),
+                    ('one-shot', 'if (attempted) return;', 'if (attempted > 1u) return;', ('golden',0), 1, 0),
                     ('guard-selftest', 'if (!dwc3_probe_guard_selftest(table)) return;',
-                     '(void)dwc3_probe_guard_selftest(table);', ('selftest',5))]
-        for label, old, new, case in controls:
-            binary = build(label, replace_once(source,old,new), 1)
+                     '(void)dwc3_probe_guard_selftest(table);', ('selftest',5), 1, 0),
+                    ('saved-spsr', spsr_check, '0u', ('irq-state',1), 1, 1),
+                    ('target-inhibit', '#if !STAGE90_DWC3_TARGET_READS', '#if 0', ('golden',0), 0, 1)]
+        for label, old, new, case, target, irq in controls:
+            binary = build(label, replace_once(source,old,new), target=target, irq=irq)
             result = command([str(binary),case[0],str(case[1])])
             if result.returncode == 0 or 'CHECK line ' not in result.stderr:
                 raise ValueError('negative must fail a C assertion, not compile/crash: '+label+'\n'+result.stderr)
