@@ -28,3 +28,9 @@ dist/
 *.swp
 *.swo
 __pycache__/
+
+# Private device evidence and license-uncertain audit snapshots
+/records/hardware-runs/
+/records/baselines/
+/records/patches/
+/records/sol-rebaseline.md
