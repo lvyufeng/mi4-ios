@@ -4,6 +4,17 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifndef STAGE90_DWC3_READONLY
+#define STAGE90_DWC3_READONLY 0
+#endif
+#if STAGE90_DWC3_READONLY != 0 && STAGE90_DWC3_READONLY != 1
+#error "STAGE90_DWC3_READONLY must be 0 or 1"
+#endif
+#if STAGE90_DWC3_READONLY && !STAGE90_SKIP_USB_PREBOOT
+#error "DWC3 identification requires the legacy CI preboot stage OFF"
+#endif
+void stage90_dwc3_readonly_probe(void);
+
 #include "xnu_workspace.h"
 #include "xnu_object_subset.h"
 #include "xnu_compile_graph.h"

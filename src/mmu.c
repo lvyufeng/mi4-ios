@@ -5514,6 +5514,10 @@ static void build_identity_table(void)
 
     /* MSM8974 PS_HOLD reset register lives in the 0xfc400000 section. */
     map_section_mmio(0xfc400000u, 0xfc400000u);
+#if STAGE90_DWC3_READONLY
+    /* Primary-port resource; no controller access or initialization here. */
+    map_section_mmio(0xf9200000u, 0xf9200000u);
+#endif
 }
 
 static void enable_identity_mmu(void)

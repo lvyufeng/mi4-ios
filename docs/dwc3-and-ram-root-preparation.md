@@ -93,11 +93,53 @@ replacement library. Actual manifests, inputs and reports with private labels
 must remain private. Success reports contain guest content metadata, not host
 input paths, and are not placed inside the guest.
 
+## Guarded identity preparation
+
+`src/dwc3_identify.{c,h}` reads through a supplied error-return callback. It
+requires all five branch clocks explicitly enabled and CBCR[31:28] exactly 0 or 2,
+reset deasserted, and a running/stable root clock before checking GSNPSID. Failed
+reads never gain valid bits. A callback is a trust boundary, not a raw volatile
+load that can claim success after an exception.
+
+`src/stage90_guarded_read32.{c,h}` and `_arm.S` provide a narrowly scoped pre-XNU
+ARM/SVC/little-endian guarded load. The original vector's exact fault PC and DFAR
+must match the dedicated single 32-bit LDR; only documented synchronous read
+fault classes are recoverable. Before arming any target load, the wrapper reads
+back actual CPSR after requesting IRQ/FIQ masking; if the required state did not
+take effect, it restores the original masks and returns a nonzero status without
+reading the target or changing the output. The failure label returns nonzero without storing
+an output. Unsupported active faults retain a RAM breadcrumb and park rather than
+fall through to the existing generic instruction-skip handler. This is not an
+SMP, Thumb, XNU, arbitrary-pointer or universal crash-recovery API.
+
+The opt-in `src/dwc3_probe.c` checks the original vectors, actual identity table,
+MMU/cache/TEX-remapping state, strongly-ordered mappings and existing recovery
+nets. It first checks a real RAM read and a confirmed unmapped-section translation
+fault, then guarded live watchdog reads and exactly 15 whitelisted clock/reset/
+core reads. A failed prerequisite stops the probe; it does not turn on clocks or
+reset/configure the controller. Host tests exercise the actual C with explicitly
+mocked CPU/guarded-load seams, not hardware exceptions.
+
+```sh
+python3 tools/test_guarded_read32.py --cc gcc
+python3 tools/test_guarded_read32.py --cc clang --sanitize
+python3 tools/test_dwc3_identify.py --cc gcc
+python3 tools/test_dwc3_probe.py --cc clang --sanitize
+python3 tools/test_dwc3_readonly_checker.py
+python3 tools/test_dwc3_capture.py
+```
+
+The separate verified-build profile keeps old CI USB and all medium-write gates
+OFF, pins inputs/outputs and requires actual linked opcode/configuration checks.
+The checker tests use synthetic ELF bytes; the capture tests use synthetic logs.
+They are not evidence that an unbuilt profile is usable. Real logs remain private.
+
 ## Hardware boundary
 
 The actual recovered phone gadget is DWC3, not the separately implemented legacy
 CI controller. Changing a CI base address cannot port its QH/dTD driver to DWC3.
-A separate identification probe is being developed with strict clock gating,
-read-only address allowlists, guarded ARM loads and verified recovery prerequisites.
-It is not integrated by these modules. Neither volatile loads, software deadlines,
+The guarded identity probe is separate from the offline event/EP0 modules and
+still does not initialize a USB link. Neither volatile loads, software deadlines,
 clock flags nor exception fixups can guarantee completion of a stalled MMIO bus.
+The watchdog recovery path also depends on the SoC/secure world surviving the
+fault. Identification, when proven on hardware, is not a transport or iOS startup.

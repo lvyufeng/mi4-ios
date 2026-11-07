@@ -155,6 +155,9 @@ int kernel_entry(struct boot_args *args)
         xnu_log_puts("kernel_entry bad: MMU identity selftest\n");
         return 0;
     }
+#if STAGE90_DWC3_READONLY
+    stage90_dwc3_readonly_probe();
+#endif
 
 #if STAGE90_EXCLUSIVE_PROBE
     /*

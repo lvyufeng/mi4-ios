@@ -154,6 +154,31 @@ actual supplier event formats, wrap-safe byte counts, budgets and framing refusa
 Clang/GCC native tests and sanitizer tests passed; no event-ring or EP0 hardware
 adapter has been integrated. These tests are not USB connectivity evidence.
 
+### Guarded-read hardware prerequisite
+
+A separate opt-in build completed all five stages, 27 final acceptance commands
+and 68 linked probe/configuration/opcode checks. Its image SHA256 was:
+
+`446eaf8408247baf33bbfd1fe74d1677a72fd5582443d835a1255693a9eca3dd`
+
+The XNU entry ELF remained identical to the prior witness entry; the new guarded
+identity probe was payload-only. One bounded RAM boot recovered to Android. The
+normal guarded RAM read passed, but execution stopped at the intentional unmapped
+translation-fault selftest before its result was logged. **No new-probe watchdog,
+clock or DWC3 register read occurred.** This is a guarded-recovery prerequisite
+failure, not evidence that DWC3 itself failed to answer. The log did not capture
+DFSR/DFAR/SPSR for that fault, so the exact reject condition remains unmeasured.
+
+Review found a coverage gap: host tests assumed `CPSID if` sets both mask bits,
+whereas historical same-device records show F remaining clear. That is the leading
+hypothesis, not the captured SPSR of this boot. The subsequent correction retains
+the strict exception policy and adds actual post-mask CPSR readback **before any
+target load or guard activation**. If masking did not take effect, it restores the
+original state, returns a nonzero status and leaves output unchanged. Dedicated
+cases cover missing I, missing F and neither effective, all with zero target-load
+calls. A separate diagnostic build/boot must measure that state before any further
+policy or controller changes. No automatic retry or gate relaxation is used.
+
 ### Root-system provenance and capacity
 
 The current 512 KiB RAM root contains only launchd and dyld, with no dependency

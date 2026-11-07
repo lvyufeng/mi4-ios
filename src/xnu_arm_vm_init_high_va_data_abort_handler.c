@@ -18,6 +18,9 @@
  */
 
 #include "stage90.h"
+#if defined(STAGE90_DWC3_READONLY) && STAGE90_DWC3_READONLY
+#include "stage90_guarded_read32.h"
+#endif
 
 /* Inline TTBR0/VBAR/IRQ helpers (copied from high_va_irq_handler pattern) */
 static inline uint32_t hvda_read_ttbr0(void)
@@ -128,6 +131,22 @@ static void stage90_xnu_arm_vm_init_high_va_data_abort_handler_log(
 /* Data abort C handler - called from vector_data_abort with stack pointer in r0 */
 void stage90_data_abort_c_handler(uint32_t *stack_ptr)
 {
+#if defined(STAGE90_DWC3_READONLY) && STAGE90_DWC3_READONLY
+	/* Guard hook MUST precede every legacy log/count/PC-skip operation. */
+	if (stage90_guarded_read32_state.active != 0u) {
+		uint32_t saved_cpsr;
+		enum stage90_guarded_abort_result guarded;
+		__asm__ volatile ("mrs %0, spsr" : "=r"(saved_cpsr));
+		guarded = stage90_guarded_read32_abort_policy(
+		    &stage90_guarded_read32_state, stack_ptr,
+		    hvda_read_dfsr(), hvda_read_dfar(), saved_cpsr);
+		if (guarded == STAGE90_GUARDED_RECOVERED)
+			return;
+		/* Never fall through to generic +4 while guard is/was active. */
+		stage90_guarded_read32_park();
+	}
+#endif
+
 	uint32_t dfsr = hvda_read_dfsr();
 	uint32_t dfar = hvda_read_dfar();
 	uint32_t lr = stack_ptr[5];  /* LR is at offset [5] after r0-r3, r12 */
