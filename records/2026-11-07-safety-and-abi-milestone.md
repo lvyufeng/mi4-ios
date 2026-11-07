@@ -261,12 +261,38 @@ read was used. The thirteen sequential words are not an atomic snapshot.
 Its image SHA256:
 `4480ac00bb4f305af6017f36f2e6cb9879188aaa4bf55e6eee37a213328372fd`.
 
-The next prerequisite is a separate RAM-only guarded-store test: one owned RAM
-word with readback and one confirmed-unmapped STR fault. The primitive defaults
-OFF; write faults always mean indeterminate, never retry/rollback. Its write
-policy rejects external-abort classes pending a documented field guarantee,
-even when raw WnR is set. Host C/sanitizer/opcode tests do not establish real
-store recovery. No clock write is enabled by these snapshots or offline tests.
+### Guarded-store hardware prerequisite
+
+The separate RAM-only guarded-store image completed all five build stages, 31
+acceptance commands and 126 actual linked checks. Its independently rebuilt four
+entry artifacts were byte-identical to the accepted read-recovery entry. Image
+SHA256:
+
+`219d5eecb2b31d5c5df16964234c3a94b41976e022876df661bb466c823ddd20`.
+
+One bounded RAM boot passed the existing read/fault guard, wrote the exclusively
+owned RAM word at `0x0077aea4` from `0xa55a12ed` to `0x53545231`, and read that value
+back. The intentional unmapped STR returned 8 with DFSR `0x00000805`, DFAR
+`0xdeadc000`, observed/expected PC `0x0000d134`, SPSR `0x60000193`, count 1,
+active 0, status 8 and operation 1. Both writes measured CPSR
+`0x60000113` → `0x60000193` → restored `0x60000113`. Android recovered. There was
+one RAM store and one unmapped store attempt, no restoration/retry, controller
+target read or target MMIO write. This proves the narrow synchronous RAM/translation
+write-recovery contract, not general MMIO completion or asynchronous FIQ delivery.
+The primitive remains default-OFF; returned write fault 8 is always indeterminate.
+External-abort write classes remain unsupported pending a documented field guarantee.
+
+A future master-root transaction has passed callback-only source review, host
+GNU GCC/Clang sanitizer tests and ARM compilation, but has not been deployed.
+Supply review corrected an important assumption: the vendor single-rate root
+configuration is in `msm8974_clock_post_init`, not pre-init. Clock registration
+intends temporary maximum VDD votes before handoff/post-init; skipping a per-rate
+vote for an unprepared clock does not establish voltage independence. No source
+contract establishes that M/N/D/CFG writes are harmless before UPDATE either.
+Inherited supply context therefore remains a separate unresolved prerequisite;
+PLL active, CPU operation, vote bits and leaf-OFF samples do not prove it. No
+PLL/RPM/PMIC/security write, clock commit, branch enable or DWC3 access follows
+automatically from the successful RAM test.
 
 ### Root-system provenance and capacity
 

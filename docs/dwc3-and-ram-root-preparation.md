@@ -207,9 +207,14 @@ python3 tools/check_dwc3_store_capture.py /ABS/PRIVATE/recovered-console
 
 The canonical full-build profile is
 `tools/build_profile_d13_guard_store_selftest.json` (five stages, 31 acceptance
-commands). A passing real RAM-store test is still not permission or proof for
-clock writes; root configuration, supplies, quiescence and the hardware adapter
-remain separate obligations. See the milestone record for actual build/boot state.
+commands). This profile has now passed one real RAM boot: the owned word read
+back correctly, and the intentional unmapped STR recovered with DFSR `0x805`,
+exact PC/DFAR, status 8 and restored CPSR; Android recovered. A passing real
+RAM-store test is still not permission or proof for clock writes. Vendor post-init
+runs after intended temporary maximum-VDD setup, so absence of a per-rate vote
+cannot establish voltage independence. Root configuration, inherited supplies,
+quiescence and the hardware adapter remain separate obligations. See the milestone
+record for exact build/boot evidence and limits.
 
 ## Hardware boundary
 
