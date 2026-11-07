@@ -321,6 +321,40 @@ or seqlock protocol. Do not switch to the different V1 ABI or add more statistic
 merely to obtain clock-write approval. Supply level remains UNKNOWN, and the
 five-write master-root candidate remains undeployed.
 
+### PM8841 S2 programmed-control outcome
+
+A separate five-stage build passed 35 acceptance commands and 147 actual linked
+checks. The two command values and four permitted read addresses matched exact
+8/16-byte tables; guarded read/write state was 56 bytes. Rebuilt entry artifacts
+remained byte-identical. Final ARM code used a 72-byte core frame and an 88-byte
+probe frame, clearing the static diagnostic output through memset rather than a
+large stack temporary. Image SHA256:
+
+`8471d31a2753631b96a5244e0f142a849e4408d57c6568348bc48410117a932e`.
+
+One bounded RAM boot completed nine reads and the two fixed EXT_READL commands;
+both transactions reported exact DONE on their first poll, then Android recovered.
+Controller version was `0x20000002`. RANGE/VSET readback `0x0000ce00` decodes as
+range 0, VSET 206, **1,030,000 microvolts programmed setpoint**. MODE/ENABLE
+readback `0x00008080` reports HPM and enable requests, with AUTO clear. The same
+boot first passed guarded read/fault and RAM-store/fault preflights. No PMIC
+voltage, RPM vote, clock, security-routing or medium write occurred; the two
+controller CMD stores requested reads, not PMIC writes. No retry followed.
+
+This is normal programmed-regulator evidence, not an ADC or permanent electrical
+floor. More importantly, this Linux source does not map the applicable RPM NORMAL
+corner to that 1.03V value. The 900mV comparison is only advisory; the physical
+regulator node's 1.05V maximum is not a ceiling on the separate corner interface.
+The missing relation is corner-to-setpoint coverage, not a demand for repeated
+SPMI sampling or a new ADC gate. The master-root candidate remains offline.
+
+The source-defined alternative is the ordinary RPM regulator protocol: discover
+the actual `rpm_requests` endpoint, establish its bounded transport, submit ACTIVE
+`smpb2` NORMAL plus enable, and verify the corresponding successful ACK. Public
+API NORMAL is 5; subtracting NONE=1 produces wire `corn=4`, with `swen=1`. A local
+cached success or unrelated ACK does not count. Directory discovery alone neither
+opens a channel nor proves RPM liveness or a completed supply request.
+
 ### Root-system provenance and capacity
 
 The current 512 KiB RAM root contains only launchd and dyld, with no dependency
@@ -332,13 +366,37 @@ be copied wholesale or used as proof of genuine service behavior.
 A further metadata-only audit found local root/archive candidates, but their
 VERSION/BOOT-MAP identify the same finite-app-launch laboratory lineage, not an
 independent stock source. BOOT-MAP explicitly records a donor-cache UIKit guard
-with code/signature-range patches. The affected-library boundaries are not yet
-established, so the complete cache cannot be treated as untouched stock. No
-verified same-build standalone libbsm/libSystem set or runnable ARMv7 cache-deopt
-result was found in the limited material audit. Existing extractor API metadata
-is not evidence of successful reconstruction. The hash-verified laboratory root's
-SystemVersion metadata states iOS 7.1.2 / build 11D257; that text does not establish
-that its executable or cache bytes are authentic to that build.
+with code/signature-range patches. A subsequent independent reference audit used
+[Apple's original iPhone3,1 7.1.2 / 11D257 archive](https://secure-appldnld.apple.com/iOS7.1/031-4812.20140627.cq6y8/iPhone3,1_7.1.2_11D257_Restore.ipsw),
+verified its 1,204,958,925-byte length and SHA256 against the
+[published metadata](https://ipsw.me/download/iPhone3,1/11D257/):
+
+`8df4acce2cc2989ad159f980dd65a4bdc8c9eab4000e35169baa70ceb8749b2d`.
+
+BuildManifest confirmed the OS member. A normal private host decode with the
+[public RootFS metadata](https://api.ipsw.me/v4/keys/ipsw/iPhone3,1/11D257) produced
+an independently listable root; encrypted member and archive hashes remained
+unchanged. Official launchd and dyld match the current RAM-root files byte for
+byte. The official cache is 315,952,666 bytes, SHA256:
+
+`f8e3e2ebbc6d7c4e1e90716745eb635278b1422a3f643a0422bbf1be682f3437`.
+
+The laboratory cache differs in 132,590 bytes across 56 4KiB pages, despite having
+the same UUID, header, mappings, image list and Mach-O load commands. Every
+file-backed TEXT/DATA segment in launchd's 33-image dependency closure matches
+the official cache; there is no LINKEDIT difference. Changes outside that closure
+include xpcd_cache, UIKit, CoreImage, Celestial, SpringBoardFoundation,
+TelephonyUtilities, GraphicsServices and shared sqlite alias bytes; the cache
+signature also differs. The modified cache is therefore not a whole-system stock
+reference. Future userland work will use the independently sourced official cache,
+not these laboratory patches. This is file-state evidence, not proof that any of
+those dependencies have run on the phone.
+
+No verified same-build standalone libbsm/libSystem set or runnable ARMv7
+cache-deopt result was found in the limited material audit. Existing extractor
+API metadata is not evidence of successful reconstruction. Both roots' system
+version text is 7.1.2 / 11D257; provenance rests on the archive-to-file chain,
+not on editable version text or a matching UUID alone.
 
 The launchd dependency closure includes 33 cached libraries. The complete cache
 is about 301 MiB and cannot be embedded in the actually owned 64 MiB window.

@@ -46,7 +46,7 @@ const unsigned char stage90_guarded_read32_recovery[4] __attribute__((aligned(4)
 static struct stage90_guarded_read32_state ram_evidence, fault_evidence;
 static uint32_t saved_f;
 static int irq_case=-1;
-#if STAGE90_GUARDED_STORE_SELFTEST
+#if STAGE90_GUARDED_STORE_SELFTEST || STAGE90_SPMI_S2_READ
 const unsigned char stage90_guarded_write32_fault[4] __attribute__((aligned(4)))={9,10,11,12};
 static int store_case=-1;
 static unsigned store_calls;
@@ -63,7 +63,17 @@ static uint32_t en=1u, first=200u, second=220u;
 static struct stage90_hw_watchdog_result wd;
 static struct effects { unsigned reads, logs, textbytes, mmu, watchdogs, deadmans, delays, ticks; } effects;
 static char text[1024];
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+#include "spmi_s2_read.h"
+#define MAX_LOGS 2048u
+static struct { const char *key; uint32_t value; } logs[MAX_LOGS];
+static uint32_t golden[214]={0u,0xdeadc000u,0u,0u,0xf9017008u,0xf901700cu,0xf901700cu};
+static uint32_t seen[214];
+static int cmd_fail=-1,spmi_case=-1;
+static unsigned spmi_reads,cmd_calls,status_reads,spmi_delay_count;
+static uint32_t version=0x10000000u,diagnostic,spmi_status=1u;
+#define TARGET_COUNT 207u
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
 #include "rpm_rbcpr_snapshot.h"
 #define MAX_LOGS 256u
 static struct { const char *key; uint32_t value; } logs[MAX_LOGS];
@@ -112,7 +122,12 @@ const struct stage90_hw_watchdog_result *stage90_hw_watchdog_result(void)
 uint32_t stage90_deadman_armed(void) { ++effects.deadmans; return (uint32_t)deadman; }
 uint64_t timebase_ticks(void) { uint64_t result=now; ++effects.ticks; now+=step; return result; }
 uint32_t timebase_elapsed_us(uint64_t start, uint64_t end) { CHECK(end>=start); return (uint32_t)(end-start); }
-void delay_us(uint32_t usec) { CHECK(usec==500u); ++effects.delays; }
+void delay_us(uint32_t usec) {
+#if STAGE90_SPMI_S2_READ
+    if(usec==1u) { ++spmi_delay_count;return; }
+#endif
+    CHECK(usec==500u); ++effects.delays;
+}
 void xnu_log_puts(const char *s)
 {
     int n=snprintf(text+effects.textbytes,sizeof(text)-effects.textbytes,"%s",s);
@@ -141,6 +156,13 @@ void xnu_log_kv32(const char *key, uint32_t value)
         "dwc3_store_fault_expected_pc","dwc3_store_fault_spsr","dwc3_store_fault_count",
         "dwc3_store_fault_active","dwc3_store_fault_status","dwc3_store_fault_operation",
         "dwc3_store_fault_cpsr_before","dwc3_store_fault_cpsr_after","dwc3_store_fault_cpsr_restored"
+#if STAGE90_SPMI_S2_READ
+        ,"spmi_ro_read_index","spmi_ro_read_address","spmi_ro_read_result","spmi_ro_read_value",
+        "spmi_ro_write_index","spmi_ro_write_address","spmi_ro_write_value","spmi_ro_write_result",
+        "spmi_ro_status","spmi_ro_read_attempts","spmi_ro_completed_reads","spmi_ro_write_attempts",
+        "spmi_ro_completed_writes","spmi_ro_indeterminate","spmi_ro_data_zero","spmi_ro_data_one",
+        "spmi_ro_setpoint_uv","spmi_ro_range_raw","spmi_ro_vset_raw","spmi_ro_mode_raw","spmi_ro_enable_raw","spmi_ro_valid_mask"
+#endif
 #if STAGE90_RPM_RBCPR_SNAPSHOT
         ,"rpm_ro_read_index","rpm_ro_read_address","rpm_ro_read_result","rpm_ro_read_value",
         "rpm_ro_status","rpm_ro_completed_reads","rpm_ro_attempted_reads","rpm_ro_failed_slot",
@@ -163,7 +185,10 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
     unsigned i=effects.reads++;
     CHECK(i<sizeof(seen)/sizeof(seen[0]) && out!=NULL); seen[i]=address;
     if(direct) {
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+        if((int)i==fail) { *out=0xdeadbeefu;return -7; }
+        *out=1u;return 0;
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
         if((int)i==fail) { *out=0x191000u; return -7; }
         *out=address==0xfc190010u ? values[0] : 1u; return 0;
 #else
@@ -175,7 +200,7 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
     if(i==0u) {
         unsigned j;
         CHECK(address!=0u && (address&3u)==0u);
-#if STAGE90_DWC3_ROOT_SNAPSHOT || STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_DWC3_ROOT_SNAPSHOT || STAGE90_RPM_RBCPR_SNAPSHOT || STAGE90_SPMI_S2_READ
         for(j=1u;j<sizeof(golden)/sizeof(golden[0]);++j) CHECK(address!=golden[j]);
 #else
         for(j=1u;j<20u;++j) CHECK(address!=golden[j]);
@@ -199,13 +224,36 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
         *out=guard_case==2 ? 0x47524451u : 0x47524450u;
         return 0;
     }
-#if STAGE90_GUARDED_STORE_SELFTEST
-    if(i>=2u) {
+#if STAGE90_GUARDED_STORE_SELFTEST || STAGE90_SPMI_S2_READ
+    if(i>=2u && (STAGE90_GUARDED_STORE_SELFTEST || i<4u)) {
         CHECK(i<4u && address==(uint32_t)(uintptr_t)&dwc3_probe_store_word && *out==0u);
         stage90_guarded_read32_state=(struct stage90_guarded_read32_state){0};
         if((i==2u && store_case==0) || (i==3u && store_case==3)) return -7;
         *out=dwc3_probe_store_word;
         if((i==2u && store_case==1) || (i==3u && store_case==4)) *out^=1u;
+        return 0;
+    }
+#endif
+#if STAGE90_SPMI_S2_READ
+    if(i>=4u) {
+        if(i<7u) {
+            CHECK(address==golden[i] && *out==0u);
+            if((int)i==fail) return -7;
+            *out=i==4u ? en : i==5u ? first : second;
+            return 0;
+        }
+        CHECK(*out==0u);
+        CHECK(address==0xfc4cf000u || address==0xfc4cf808u || address==0xfc4caf20u || address==0xfc4cf818u);
+        ++spmi_reads;golden[i]=address;
+        if((int)i==fail) { *out=0xdeadbeefu;return -7; }
+        if(address==0xfc4cf000u) *out=version;
+        else if(address==0xfc4caf20u) *out=diagnostic;
+        else if(address==0xfc4cf818u) { CHECK(cmd_calls>0u && cmd_calls<=2u);*out=cmd_calls==1u ? 0x0000b400u : 0x00008080u; }
+        else {
+            ++status_reads;
+            *out=spmi_case==0 && status_reads==1u ? 4u : spmi_case==1 && status_reads==2u ? 4u :
+                spmi_case==2 && status_reads==2u ? 2u : spmi_case==3 && status_reads>=2u ? 0u : spmi_status;
+        }
         return 0;
     }
 #endif
@@ -256,15 +304,29 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
 #endif
         return -7;
     }
+#if !STAGE90_SPMI_S2_READ
     *out=i==2u ? en : i==3u ? first : i==4u ? second : values[i-5u];
+#endif
     return 0;
 }
-#if STAGE90_GUARDED_STORE_SELFTEST
+#if STAGE90_GUARDED_STORE_SELFTEST || STAGE90_SPMI_S2_READ
 uint32_t stage90_guarded_read32_cpsr_read(void) { return store_restored; }
 int stage90_guarded_write32(uint32_t address, uint32_t value)
 {
     struct stage90_guarded_read32_state state={0};
     unsigned call=store_calls++;
+#if STAGE90_SPMI_S2_READ
+    if(call>=2u || direct) {
+        unsigned n=cmd_calls++;
+        CHECK(n<2u && address==0xfc4cf800u);
+        CHECK(value==(n==0u ? 0x08517401u : 0x08517451u));
+        if((int)n==cmd_fail) return STAGE90_GUARDED_WRITE_FAULT;
+        stage90_guarded_read32_state=(struct stage90_guarded_read32_state){0};
+        stage90_guarded_read32_state.status=STAGE90_GUARDED_OK;
+        stage90_guarded_read32_state.operation=1u;
+        return 0;
+    }
+#endif
     CHECK(call<2u);
     CHECK(address==(call==0u ? (uint32_t)(uintptr_t)&dwc3_probe_store_word : 0xdeadc000u));
     CHECK(value==(call==0u ? 0x53545231u : 0xfeed1234u));
@@ -304,7 +366,38 @@ int stage90_guarded_write32(uint32_t address, uint32_t value)
     return store_case==26 ? 0 : STAGE90_GUARDED_WRITE_FAULT;
 }
 #endif
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+static void callback_checks(void)
+{
+    struct spmi_probe_context ctx={0};
+    uint32_t value=0x12345678u;
+    uint64_t stamp=0;
+    static const uint32_t bad[]={0u,0xfc4cf800u,0xfc4cf810u,0xfc4ca000u,0xf920c120u,0xfc190010u,0xffffffffu};
+    unsigned i;
+    direct=1;
+    for(i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
+        ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_read(&ctx,bad[i],&value)!=0 && ctx.stopped);
+    }
+    ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_read(&ctx,0xfc4cf000u,NULL)!=0 && ctx.stopped);
+    CHECK(spmi_probe_read(NULL,0xfc4cf000u,&value)!=0);
+    ctx=(struct spmi_probe_context){0};ctx.reads=207u;CHECK(spmi_probe_read(&ctx,0xfc4cf000u,&value)!=0);
+    ctx=(struct spmi_probe_context){0};now=10000u;CHECK(spmi_probe_read(&ctx,0xfc4cf000u,&value)!=0);
+    ctx=(struct spmi_probe_context){0};now=9999u;CHECK(spmi_probe_read(&ctx,0xfc4cf000u,&value)==0);
+    CHECK(effects.reads==1u && ctx.reads==1u);
+    fail=1;CHECK(spmi_probe_read(&ctx,0xfc4cf000u,&value)==-7 && ctx.stopped);
+    CHECK(spmi_probe_read(&ctx,0xfc4cf808u,&value)!=0 && effects.reads==2u);fail=-1;
+    ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_write(&ctx,0xfc4cf810u,0x08517401u)!=0 && ctx.stopped);
+    ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_write(&ctx,0xfc4cf800u,0x08517451u)!=0 && ctx.stopped);
+    ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_write(&ctx,0xfc4cf800u,0x08517400u)!=0 && ctx.stopped);
+    ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_write(&ctx,0xfc4cf800u,0x08517401u)==0);
+    CHECK(spmi_probe_write(&ctx,0xfc4cf800u,0x08517451u)==0 && ctx.writes==2u);
+    CHECK(spmi_probe_write(&ctx,0xfc4cf800u,0x08517451u)!=0 && cmd_calls==2u);
+    ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_delay(&ctx,2u)!=0 && ctx.stopped);
+    ctx=(struct spmi_probe_context){0};CHECK(spmi_probe_delay(&ctx,1u)==0 && spmi_delay_count==1u);
+    CHECK(spmi_probe_time(&ctx,&stamp)==0 && stamp==9999u);
+    CHECK(spmi_probe_time(&ctx,NULL)!=0 && spmi_probe_write(NULL,0xfc4cf800u,0x08517401u)!=0);
+}
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
 static void callback_checks(void)
 {
     struct rpm_probe_context ctx={0};
@@ -522,9 +615,95 @@ static int rpm_main(int argc, char **argv)
     printf("PASS %u\n",checks);return 0;
 }
 #endif
+#if STAGE90_SPMI_S2_READ
+static int spmi_main(int argc,char **argv)
+{
+    const char *name,*skip=NULL;
+    unsigned p,i,expected=16u,writes=4u,summary=1u,delays=1u,read_logs=0u,value_logs=0u,write_logs=0u;
+    unsigned completed=9u,attempts=9u,commands=2u,done_writes=2u,status=SPMI_S2_OK;
+    struct effects saved;unsigned saved_stores;
+    CHECK(argc==3);name=argv[1];p=(unsigned)strtoul(argv[2],NULL,10);
+    fake_vbar=(uint32_t)(uintptr_t)stage90_vectors;fake_ttbr0=(uint32_t)(uintptr_t)l1;
+    l1[0xf92]=0xf9200000u|STAGE90_PMAP_DESC_SECTION_SO;l1[0xfc4]=0xfc400000u|STAGE90_PMAP_DESC_SECTION_SO;
+    wd.enabled=wd.counter_running=wd.countdown_plausible=wd.readback_ok=1u;wd.bark_ticks=100000u;
+    if(!strcmp(name,"callback")) {callback_checks();printf("PASS %u\n",checks);return 0;}
+    if(!strcmp(name,"fiq")) {CHECK(p<2u);saved_f=p ? 0x40u : 0u;fake_cpsr|=saved_f;}
+    else if(!strcmp(name,"irq-state")) {CHECK(p<16u);irq_case=(int)p;if(p<13u){expected=2u;skip="guard translation-fault selftest failed";}}
+    else if(!strcmp(name,"cpu")) {
+        static const unsigned cb[]={0,1,2,3,4,5,9,24},sb[]={0,2,13,25,28,30};
+        CHECK(p<14u);if(p<8u)fake_cpsr^=1u<<cb[p];else fake_sctlr^=1u<<sb[p-8u];skip="CPU/MMU/vector precondition";
+    } else if(!strcmp(name,"precondition")) {
+        CHECK(p<8u);switch(p){case 0:fake_ttbcr=1u;break;case 1:fake_vbar^=4u;break;case 2:fake_ttbr0^=0x4000u;break;
+        case 3:case 4:case 5:fake_dacr=p-3u;break;case 6:null_table=1;break;case 7:fake_cpsr=0x12u;break;}skip="CPU/MMU/vector precondition";
+    } else if(!strcmp(name,"mapping")) {CHECK(p<4u);l1[p<2u ? 0xf92 : 0xfc4]=p%2u ? 0xf9200c02u : 0u;skip="identity MMIO mapping mismatch";}
+    else if(!strcmp(name,"watchdog")) {
+        CHECK(p<7u);switch(p){case 0:null_watchdog=1;break;case 1:wd.enabled=0u;break;case 2:wd.counter_running=0u;break;
+        case 3:wd.countdown_plausible=0u;break;case 4:wd.readback_ok=0u;break;case 5:wd.bite_truncated=1u;break;case 6:deadman=0;break;}skip="recovery net not confirmed";
+    } else if(!strcmp(name,"selftest")) {
+        CHECK(p<19u);guard_case=(int)p;if(p==0u){l1[0xdea]=1u;expected=0u;skip="guard selftest address is mapped";}
+        else if(p<3u || p>=16u){expected=1u;skip="guard RAM selftest failed";}else{expected=2u;skip="guard translation-fault selftest failed";}
+    } else if(!strcmp(name,"store")) {
+        CHECK(p<27u);store_case=(int)p;
+        expected=p<2u ? 3u : p==2u || (p>=5u && p<12u) ? 3u : 4u;
+        writes=p<2u ? 0u : p<12u ? 1u : 2u;
+        skip=p<12u ? "guard STORE RAM selftest failed" : "guard STORE translation-fault selftest failed";
+    } else if(!strcmp(name,"fault")) {
+        CHECK(p<12u);fail=(int)p+4;expected=p+5u;
+        if(p<3u){summary=0u;delays=p==2u;writes=2u;}
+        else{completed=p-3u;attempts=completed+1u;commands=completed<3u ? 0u : completed<7u ? 1u : 2u;
+            done_writes=commands;writes=2u+commands;status=SPMI_S2_READ_FAILED;}
+    } else if(!strcmp(name,"command-fault")) {
+        CHECK(p<2u);cmd_fail=(int)p;commands=p+1u;done_writes=p;writes=3u+p;
+        completed=attempts=p ? 7u : 3u;expected=7u+completed;status=SPMI_S2_WRITE_FAILED;
+    } else if(!strcmp(name,"spmi-status")) {
+        CHECK(p<4u);spmi_case=(int)p;completed=attempts=p==0u ? 2u : p==3u ? 103u : 4u;
+        expected=7u+completed;commands=done_writes=p==0u ? 0u : 1u;writes=2u+commands;
+        status=p<2u ? SPMI_S2_DENIED : p==2u ? SPMI_S2_BAD_STATUS : SPMI_S2_TIMEOUT;
+    } else if(!strcmp(name,"en-off")){en=0u;expected=5u;summary=delays=0u;writes=2u;}
+    else if(!strcmp(name,"counter")) {
+        CHECK(p<7u);switch(p){case 0:second=first;break;case 1:second=first-2u;break;case 2:wd.bark_ticks=110u;break;
+        case 3:wd.bark_ticks=109u;break;case 4:wd.bark_ticks=110u+65529u;break;case 5:wd.bark_ticks=110u+65530u;break;
+        case 6:first|=0xffe00001u;second|=0xffe00001u;break;}if(p<5u){expected=7u;summary=0u;writes=2u;}
+    } else if(!strcmp(name,"spmi-budget")){CHECK(p<2u);step=p ? 5000u : 10001u;expected=7u;writes=2u;commands=done_writes=completed=0u;attempts=p ? 1u : 0u;status=p ? SPMI_S2_READ_FAILED : SPMI_S2_TIME_LIMIT;}
+    else CHECK(!strcmp(name,"golden"));
+    if(skip){summary=delays=0u;if(guard_case<0 && irq_case<0 && store_case<0)expected=writes=0u;else if(store_case<0)writes=0u;}
+    stage90_dwc3_readonly_probe();
+    CHECK(effects.reads==expected && store_calls==writes && effects.delays==delays);
+    CHECK(strstr(text,"SPMI PM8841 S2 read transactions; no PMIC voltage writes")!=NULL);
+    CHECK((strstr(text,"spmi_ro finished; programmed setpoint only; no clock-write authorization")!=NULL)==summary);
+    if(skip)CHECK(strstr(text,skip)!=NULL);
+    CHECK(strstr(text,"RPM RBCPR")==NULL && strstr(text,"DWC3 read-only")==NULL);
+    for(i=0;i<effects.logs;++i){
+        CHECK(strncmp(logs[i].key,"dwc3_ro_read_",13)!=0 && strncmp(logs[i].key,"rpm_ro_",7)!=0);
+        if(!strcmp(logs[i].key,"spmi_ro_read_index"))CHECK(logs[i].value==++read_logs);
+        if(!strcmp(logs[i].key,"spmi_ro_read_value"))++value_logs;
+        if(!strcmp(logs[i].key,"spmi_ro_write_index"))CHECK(logs[i].value==++write_logs);
+        if(!strcmp(logs[i].key,"spmi_ro_write_address"))CHECK(logs[i].value==0xfc4cf800u);
+        if(!strcmp(logs[i].key,"spmi_ro_write_value"))CHECK(logs[i].value==(write_logs==1u ? 0x08517401u : 0x08517451u));
+    }
+    CHECK(read_logs==(expected>7u ? expected-7u : 0u));
+    CHECK(value_logs==read_logs-(fail>=7 ? 1u : 0u));
+    CHECK(write_logs==cmd_calls);
+    if(summary){
+        kv("spmi_ro_status",status);kv("spmi_ro_read_attempts",attempts);kv("spmi_ro_completed_reads",completed);
+        kv("spmi_ro_write_attempts",commands);kv("spmi_ro_completed_writes",done_writes);
+        kv("spmi_ro_indeterminate",status!=SPMI_S2_OK && commands>0u);
+        if(status==SPMI_S2_OK){
+            kv("spmi_ro_valid_mask",7u);kv("spmi_ro_data_zero",0xb400u);kv("spmi_ro_data_one",0x8080u);
+            kv("spmi_ro_range_raw",0u);kv("spmi_ro_vset_raw",180u);kv("spmi_ro_setpoint_uv",900000u);
+            kv("spmi_ro_mode_raw",0x80u);kv("spmi_ro_enable_raw",0x80u);
+        }
+    }
+    saved=effects;saved_stores=store_calls;stage90_dwc3_readonly_probe();
+    CHECK(!memcmp(&saved,&effects,sizeof(saved)) && saved_stores==store_calls);
+    printf("PASS %u\n",checks);return 0;
+}
+#endif
 int main(int argc, char **argv)
 {
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+    return spmi_main(argc,argv);
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
     return rpm_main(argc,argv);
 #else
     const char *name;
@@ -775,7 +954,7 @@ def main():
     if not cc: raise ValueError('empty compiler command')
     names = ['dwc3_probe.c', 'dwc3_identify.c', 'dwc3_identify.h', 'stage90.h',
              'stage90_guarded_read32.h', 'stage90_guarded_profile.h',
-             'rpm_rbcpr_snapshot.h', 'rpm_rbcpr_snapshot.c']
+             'rpm_rbcpr_snapshot.h', 'rpm_rbcpr_snapshot.c', 'spmi_s2_read.h', 'spmi_s2_read.c']
     files = [root/'src'/name for name in names]; snapshots = [p.read_bytes() for p in files]
     source = cpu_fixture(snapshots[0].decode())
     cases = [('golden', 0), ('callback', 0), ('en-off', 0), ('reset', 0), ('id', 0), ('deadline', 0)]
@@ -789,10 +968,11 @@ def main():
                               ('stage90_guarded_profile.h', snapshots[5].decode()), ('harness.c', HARNESS),
                               ('dwc3_identify.c', snapshots[1].decode()), ('dwc3_identify.h', snapshots[2].decode()),
                               ('rpm_rbcpr_snapshot.h', snapshots[6].decode()),
-                              ('rpm_rbcpr_snapshot.c', snapshots[7].decode())]:
+                              ('rpm_rbcpr_snapshot.c', snapshots[7].decode()),
+                              ('spmi_s2_read.h', snapshots[8].decode()), ('spmi_s2_read.c', snapshots[9].decode())]:
             (directory/name).write_text(content)
         def build(label, probe, enabled=1, target=1, irq=0, snapshot=0, root_snapshot=0,
-                  store32=0, store_selftest=0, rpm=0, compile_error=None):
+                  store32=0, store_selftest=0, rpm=0, spmi=0, compile_error=None):
             (directory/'actual-probe.c').write_text(probe)
             binary = directory/label
             flags = ['-std=c11', '-O0', '-Wall', '-Wextra', '-Werror', '-pedantic',
@@ -803,10 +983,11 @@ def main():
                      '-DSTAGE90_GUARDED_STORE32='+str(store32),
                      '-DSTAGE90_GUARDED_STORE_SELFTEST='+str(store_selftest),
                      '-DSTAGE90_RPM_RBCPR_SNAPSHOT='+str(rpm),
+                     '-DSTAGE90_SPMI_S2_READ='+str(spmi),
                      '-DSTAGE90_GUARDED_IRQ_ONLY='+str(irq), '-I', str(directory)]
             if args.sanitize: flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
             result = command(cc+flags+[str(directory/'harness.c'), str(directory/'dwc3_identify.c'),
-                                       str(directory/'rpm_rbcpr_snapshot.c'), '-o', str(binary)])
+                                       str(directory/'rpm_rbcpr_snapshot.c'), str(directory/'spmi_s2_read.c'), '-o', str(binary)])
             if compile_error is not None:
                 if result.returncode == 0 or compile_error not in result.stderr:
                     raise ValueError(label+' failed to reject invalid snapshot mode:\n'+result.stderr)
@@ -856,6 +1037,32 @@ def main():
         rpm_binary=build('irq-rpm-snapshot',source,target=1,irq=1,rpm=1)
         rpm_assertions=sum(run(rpm_binary,case) for case in rpm_cases)
         print('PASS profile: irq-rpm-snapshot',len(rpm_cases),'cases,',rpm_assertions,'C assertions')
+        spmi_cases=recovery_cases+[('callback',0),('en-off',0)]
+        for name,count in [('store',27),('fault',12),('command-fault',2),('counter',7),('spmi-status',4),('spmi-budget',2)]:
+            spmi_cases.extend((name,i) for i in range(count))
+        spmi_binary=build('irq-spmi-s2-read',source,target=1,irq=1,store32=1,spmi=1)
+        spmi_assertions=sum(run(spmi_binary,case) for case in spmi_cases)
+        print('PASS profile: irq-spmi-s2-read',len(spmi_cases),'cases,',spmi_assertions,'C assertions')
+        for label,old,new in (
+                ('spmi-address-whitelist','!spmi_probe_address_allowed(address)',
+                 '(0 && !spmi_probe_address_allowed(address))'),
+                ('spmi-command-whitelist','value != (context->writes == 0u ? UINT32_C(0x08517401) : UINT32_C(0x08517451))',
+                 '(0 && value != (context->writes == 0u ? UINT32_C(0x08517401) : UINT32_C(0x08517451)))')):
+            binary=build(label,replace_once(source,old,new),target=1,irq=1,store32=1,spmi=1)
+            result=command([str(binary),'callback','0'])
+            if result.returncode==0 or 'CHECK line ' not in result.stderr:
+                raise ValueError('SPMI negative must fail a C assertion: '+label+'\n'+result.stderr)
+            print('PASS negative:',label,'rejected by actual C behavior')
+        marker='STAGE90_SPMI_S2_READ_requires_READONLY_IRQ_TARGET_STORE_and_no_SELFTEST_CLOCK_ROOT_RPM'
+        for label,extra,expected_marker in (
+                ('spmi-not-bool',{'spmi':2},'STAGE90_SPMI_S2_READ_must_be_zero_or_one'),
+                ('spmi-needs-readonly',{'enabled':0},marker),('spmi-needs-target',{'target':0},marker),
+                ('spmi-needs-irq',{'irq':0},marker),('spmi-needs-store',{'store32':0},marker),
+                ('spmi-forbids-selftest',{'store_selftest':1},marker),('spmi-forbids-clock',{'snapshot':1},marker),
+                ('spmi-forbids-root',{'root_snapshot':1},marker),('spmi-forbids-rpm',{'rpm':1},marker)):
+            options=dict(target=1,irq=1,store32=1,spmi=1);options.update(extra)
+            build(label,source,compile_error=expected_marker,**options)
+            print('PASS invalid mode:',label,'rejected by explicit compile-time contract')
         for label,old,new in (
                 ('rpm-address-whitelist','!rpm_probe_address_allowed(context, address)',
                  '(0 && !rpm_probe_address_allowed(context, address))'),

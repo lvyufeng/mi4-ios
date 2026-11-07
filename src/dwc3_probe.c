@@ -19,6 +19,15 @@
 #ifndef STAGE90_RPM_RBCPR_SNAPSHOT
 #define STAGE90_RPM_RBCPR_SNAPSHOT 0
 #endif
+#ifndef STAGE90_SPMI_S2_READ
+#define STAGE90_SPMI_S2_READ 0
+#endif
+#if STAGE90_SPMI_S2_READ != 0 && STAGE90_SPMI_S2_READ != 1
+#error STAGE90_SPMI_S2_READ_must_be_zero_or_one
+#endif
+#if STAGE90_SPMI_S2_READ && (STAGE90_DWC3_READONLY != 1 || STAGE90_DWC3_TARGET_READS != 1 || !defined(STAGE90_GUARDED_IRQ_ONLY) || STAGE90_GUARDED_IRQ_ONLY != 1 || !defined(STAGE90_GUARDED_STORE32) || STAGE90_GUARDED_STORE32 != 1 || STAGE90_GUARDED_STORE_SELFTEST != 0 || STAGE90_DWC3_CLOCK_SNAPSHOT != 0 || STAGE90_DWC3_ROOT_SNAPSHOT != 0 || STAGE90_RPM_RBCPR_SNAPSHOT != 0)
+#error STAGE90_SPMI_S2_READ_requires_READONLY_IRQ_TARGET_STORE_and_no_SELFTEST_CLOCK_ROOT_RPM
+#endif
 #if STAGE90_RPM_RBCPR_SNAPSHOT != 0 && STAGE90_RPM_RBCPR_SNAPSHOT != 1
 #error STAGE90_RPM_RBCPR_SNAPSHOT_must_be_zero_or_one
 #endif
@@ -54,7 +63,9 @@
 #endif
 
 #if STAGE90_DWC3_READONLY
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+#include "spmi_s2_read.h"
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
 #include "rpm_rbcpr_snapshot.h"
 #else
 #include "dwc3_identify.h"
@@ -63,7 +74,7 @@
 
 extern uint8_t stage90_vectors[];
 
-#if !STAGE90_RPM_RBCPR_SNAPSHOT
+#if !STAGE90_RPM_RBCPR_SNAPSHOT && !STAGE90_SPMI_S2_READ
 /* This is an address whitelist, not an MMIO-completion guarantee. */
 static int dwc3_probe_address_allowed(uint32_t address)
 {
@@ -159,7 +170,7 @@ static int dwc3_probe_guard_selftest(uint32_t *table)
     return 1;
 }
 
-#if STAGE90_GUARDED_STORE_SELFTEST
+#if STAGE90_GUARDED_STORE_SELFTEST || STAGE90_SPMI_S2_READ
 /* Exclusively owned ordinary RAM, never a controller register or rollback. */
 static uint32_t dwc3_probe_store_word = UINT32_C(0xa55a12ed);
 
@@ -255,7 +266,81 @@ static int dwc3_probe_store_selftest(uint32_t *table)
 }
 #endif
 
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+struct spmi_probe_context { uint64_t start; unsigned reads, writes, stopped; };
+
+static int spmi_probe_address_allowed(uint32_t address)
+{
+    return address == UINT32_C(0xfc4cf000) || address == UINT32_C(0xfc4cf808) ||
+        address == UINT32_C(0xfc4caf20) || address == UINT32_C(0xfc4cf818);
+}
+
+static int spmi_probe_read(void *opaque, uint32_t address, uint32_t *value)
+{
+    struct spmi_probe_context *context = opaque;
+    int result;
+    if (!context) return -1;
+    if (!value || context->stopped || !spmi_probe_address_allowed(address) ||
+        context->reads >= 207u ||
+        timebase_elapsed_us(context->start, timebase_ticks()) >= 10000u) {
+        context->stopped = 1u;
+        return -1;
+    }
+    ++context->reads;
+    xnu_log_kv32("spmi_ro_read_index", context->reads);
+    xnu_log_kv32("spmi_ro_read_address", address);
+    result = stage90_guarded_read32(address, value);
+    xnu_log_kv32("spmi_ro_read_result", (uint32_t)result);
+    if (!result) xnu_log_kv32("spmi_ro_read_value", *value);
+    else context->stopped = 1u;
+    return result;
+}
+
+static int spmi_probe_write(void *opaque, uint32_t address, uint32_t value)
+{
+    struct spmi_probe_context *context = opaque;
+    int result;
+    if (!context) return -1;
+    if (context->stopped || context->writes >= 2u || address != UINT32_C(0xfc4cf800) ||
+        value != (context->writes == 0u ? UINT32_C(0x08517401) : UINT32_C(0x08517451)) ||
+        timebase_elapsed_us(context->start, timebase_ticks()) >= 10000u) {
+        context->stopped = 1u;
+        return -1;
+    }
+    ++context->writes;
+    xnu_log_kv32("spmi_ro_write_index", context->writes);
+    xnu_log_kv32("spmi_ro_write_address", address);
+    xnu_log_kv32("spmi_ro_write_value", value);
+    result = stage90_guarded_write32(address, value);
+    if (!result && (stage90_guarded_read32_state.active != 0u ||
+        stage90_guarded_read32_state.status != STAGE90_GUARDED_OK ||
+        stage90_guarded_read32_state.operation != 1u)) result = -1;
+    xnu_log_kv32("spmi_ro_write_result", (uint32_t)result);
+    if (result) context->stopped = 1u;
+    return result;
+}
+
+static int spmi_probe_time(void *opaque, uint64_t *value)
+{
+    struct spmi_probe_context *context = opaque;
+    if (!context || !value || context->stopped) return -1;
+    *value = (uint64_t)timebase_elapsed_us(context->start, timebase_ticks());
+    return 0;
+}
+
+static int spmi_probe_delay(void *opaque, uint32_t usec)
+{
+    struct spmi_probe_context *context = opaque;
+    if (!context) return -1;
+    if (context->stopped || usec != 1u ||
+        timebase_elapsed_us(context->start, timebase_ticks()) >= 10000u) {
+        context->stopped = 1u;
+        return -1;
+    }
+    delay_us(1u);
+    return 0;
+}
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
 struct rpm_probe_context { unsigned attempted, phase, stopped; uint32_t block; uint64_t start; };
 static const uint32_t rpm_probe_offsets[10] = {
     0u, 4u, 8u, 12u, 20u, 92u, 164u, 232u, 236u, 4u
@@ -322,7 +407,10 @@ static int dwc3_probe_read(void *opaque, uint32_t address, uint32_t *value)
 void stage90_dwc3_readonly_probe(void)
 {
     const struct stage90_hw_watchdog_result *watchdog;
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+    static struct spmi_s2_output spmi_snapshot;
+    struct spmi_probe_context context;
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
     struct mi4_rpm_rbcpr_snapshot rpm_snapshot;
     struct rpm_probe_context context;
 #else
@@ -339,7 +427,9 @@ void stage90_dwc3_readonly_probe(void)
 
     if (attempted) return;
     attempted = 1;
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+    xnu_log_puts("SPMI PM8841 S2 read transactions; no PMIC voltage writes\n");
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
     xnu_log_puts("RPM RBCPR V2 read-only snapshot; no clock or supply writes\n");
 #elif STAGE90_GUARDED_STORE_SELFTEST
     xnu_log_puts("DWC3 guarded RAM store selftest; no MMIO target writes\n");
@@ -395,6 +485,9 @@ void stage90_dwc3_readonly_probe(void)
     }
 #endif
     if (!dwc3_probe_guard_selftest(table)) return;
+#if STAGE90_SPMI_S2_READ
+    if (dwc3_probe_store_selftest(table) == 0) return;
+#endif
 #if STAGE90_GUARDED_STORE_SELFTEST
     if (!dwc3_probe_store_selftest(table)) return;
     xnu_log_puts("dwc3_ro store selftest passed; RAM writes only; controller target reads inhibited\n");
@@ -424,9 +517,36 @@ void stage90_dwc3_readonly_probe(void)
         xnu_log_puts("dwc3_ro skipped: watchdog not advancing or insufficient headroom\n");
         return;
     }
+#if !STAGE90_SPMI_S2_READ
     context.attempted = 0;
+#endif
     context.start = timebase_ticks();
-#if STAGE90_RPM_RBCPR_SNAPSHOT
+#if STAGE90_SPMI_S2_READ
+    {
+        const struct spmi_s2_callbacks callbacks = {
+            spmi_probe_read, spmi_probe_write, spmi_probe_time, spmi_probe_delay
+        };
+        context.reads = context.writes = context.stopped = 0;
+        (void)spmi_s2_read(&callbacks, &context, &spmi_snapshot);
+    }
+    xnu_log_kv32("spmi_ro_status", (uint32_t)spmi_snapshot.result);
+    xnu_log_kv32("spmi_ro_read_attempts", spmi_snapshot.read_attempts);
+    xnu_log_kv32("spmi_ro_completed_reads", spmi_snapshot.read_completed);
+    xnu_log_kv32("spmi_ro_write_attempts", spmi_snapshot.write_attempted);
+    xnu_log_kv32("spmi_ro_completed_writes", spmi_snapshot.write_completed);
+    xnu_log_kv32("spmi_ro_indeterminate", spmi_snapshot.indeterminate);
+    xnu_log_kv32("spmi_ro_valid_mask", spmi_snapshot.valid_mask);
+    if (spmi_snapshot.sample_valid[0]) xnu_log_kv32("spmi_ro_data_zero", spmi_snapshot.data_raw[0]);
+    if (spmi_snapshot.sample_valid[1]) xnu_log_kv32("spmi_ro_data_one", spmi_snapshot.data_raw[1]);
+    if (spmi_snapshot.decoded) {
+        xnu_log_kv32("spmi_ro_range_raw", spmi_snapshot.range_raw);
+        xnu_log_kv32("spmi_ro_vset_raw", spmi_snapshot.vset_raw);
+        xnu_log_kv32("spmi_ro_setpoint_uv", spmi_snapshot.setpoint_uv);
+        xnu_log_kv32("spmi_ro_mode_raw", spmi_snapshot.mode_raw);
+        xnu_log_kv32("spmi_ro_enable_raw", spmi_snapshot.enable_raw);
+    }
+    xnu_log_puts("spmi_ro finished; programmed setpoint only; no clock-write authorization\n");
+#elif STAGE90_RPM_RBCPR_SNAPSHOT
     context.phase = context.stopped = 0;
     context.block = 0;
     (void)mi4_rpm_rbcpr_snapshot(rpm_probe_read, &context, &rpm_snapshot);

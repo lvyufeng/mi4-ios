@@ -205,6 +205,7 @@ SOURCES=(
   timebase.c
   dwc3_identify.c
   rpm_rbcpr_snapshot.c
+  spmi_s2_read.c
   dwc3_probe.c
   stage90_guarded_read32.c
   stage90_guarded_read32_arm.S
@@ -470,7 +471,7 @@ sha256sum $REPO_ROOT/out/stage90/stage90_fixture.macho $REPO_ROOT/out/stage90/st
 # Record the switches this image was actually built with, so preflight_boot_check.sh
 # can gate a hardware run on them instead of on what the source is assumed to say.
 $CC "${CFLAGS[@]}" -E -dM -include stage90.h - </dev/null \
-  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS|HANDOFF_FAULT_INJECT_VA|XNU_MSM8974_SHIM|CACHE_MODE|XNU_REAL_DT|XNU_ENTRY|XNU_MSM8974_FIQ_PROBE|SKIP_USB_PREBOOT|DWC3_READONLY|GUARDED_IRQ_ONLY|GUARDED_STORE32|GUARDED_STORE_SELFTEST|DWC3_TARGET_READS|DWC3_CLOCK_SNAPSHOT|DWC3_ROOT_SNAPSHOT|RPM_RBCPR_SNAPSHOT) ' \
+  | grep -E '^#define STAGE90_(HANDOFF_MODE|ENTRY_LADDER_LEVEL|DEADMAN_ENABLE|DEADMAN_SELFTEST|BYPASS_ENTRY_STUB|EXCLUSIVE_PROBE|PMAP_ATTR_MODE|HW_WATCHDOG|HW_WATCHDOG_SELFTEST|XNU_BOOT_ARGS|HANDOFF_FAULT_INJECT_VA|XNU_MSM8974_SHIM|CACHE_MODE|XNU_REAL_DT|XNU_ENTRY|XNU_MSM8974_FIQ_PROBE|SKIP_USB_PREBOOT|DWC3_READONLY|GUARDED_IRQ_ONLY|GUARDED_STORE32|GUARDED_STORE_SELFTEST|DWC3_TARGET_READS|DWC3_CLOCK_SNAPSHOT|DWC3_ROOT_SNAPSHOT|RPM_RBCPR_SNAPSHOT|SPMI_S2_READ) ' \
   > $REPO_ROOT/out/stage90/stage90-build-config.txt
 # 915-B rung 1 records its switch ONLY WHEN ON, so the default (0) leaves the record byte-identical to
 # the shipped arms (the "an absent key is not a missing value but the value" idiom preflight_boot_check

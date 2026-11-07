@@ -40,6 +40,8 @@ STORE_FINISH = b'dwc3_ro store selftest passed; RAM writes only; controller targ
 RPM_OFFSETS = (0, 4, 8, 0xc, 0x14, 0x5c, 0xa4, 0xe8, 0xec, 4)
 RPM_START = b'RPM RBCPR V2 read-only snapshot; no clock or supply writes'
 RPM_FINISH = b'rpm_ro finished; sampled telemetry only; no clock-write authorization'
+SPMI_START = b'SPMI PM8841 S2 read transactions; no PMIC voltage writes'
+SPMI_FINISH = b'spmi_ro finished; programmed setpoint only; no clock-write authorization'
 MARKERS = (b'dwc3_ro guard selftest passed: RAM and translation-fault recovery',
            b'dwc3_ro skipped: guard translation-fault selftest failed',
            b'mmu legacy CI USB probe skipped; primary port is DWC3',
@@ -65,11 +67,13 @@ def branch(source, target, opcode):
 
 class Fixture:
     def __init__(self, irq_only=False, recovery_only=False, clock_snapshot=False,
-                 root_snapshot=False, store_selftest=False, rpm_snapshot=False):
+                 root_snapshot=False, store_selftest=False, rpm_snapshot=False,
+                 spmi_s2_read=False):
         self.irq_only, self.recovery_only = irq_only, recovery_only
         self.clock_snapshot, self.root_snapshot = clock_snapshot, root_snapshot
         self.store_selftest, self.rpm_snapshot = store_selftest, rpm_snapshot
-        self.payload, self.entry = image(0x1900 if rpm_snapshot else 0x1800), image(0x100)
+        self.spmi_s2_read = spmi_s2_read
+        self.payload, self.entry = image(0x1900 if rpm_snapshot or spmi_s2_read else 0x1800), image(0x100)
         self.config = ''.join('#define STAGE90_' + name + ' ' + value + '\n'
                               for name, value in (('DWC3_READONLY', '1'),
                               ('SKIP_USB_PREBOOT', '1'), ('CACHE_MODE', '0'),
@@ -87,7 +91,7 @@ class Fixture:
             'stage90_guarded_read32_abort_policy': (0x1300, 4),
             'stage90_dwc3_readonly_probe': (0x1400, 12),
             'mi4_dwc3_identify': (0x1500, 4), 'kernel_entry': (0x1600, 8),
-            'stage90_guarded_read32_state': (0x2000, 56 if store_selftest else 52)}
+            'stage90_guarded_read32_state': (0x2000, 56 if store_selftest or spmi_s2_read else 52)}
         self.nm = ''.join(f'{addr:08x} {size:08x} '
                           f'{"B" if name == "stage90_guarded_read32_state" else "T"} {name}\n'
                           for name, (addr, size) in symbols.items())
@@ -186,9 +190,9 @@ class Fixture:
             self.payload = self.payload.replace(MARKERS[-1], b'X'*len(MARKERS[-1]))
             marker = b'dwc3_ro recovery verified; controller target reads inhibited\0'
             self.payload[0x1600:0x1600+len(marker)] = marker
-        if store_selftest:
+        if store_selftest or spmi_s2_read:
             self.config += ('#define STAGE90_GUARDED_STORE32 1\n'
-                            '#define STAGE90_GUARDED_STORE_SELFTEST 1\n')
+                            '#define STAGE90_GUARDED_STORE_SELFTEST '+('1' if store_selftest else '0')+'\n')
             extra = {'stage90_guarded_write32': (0x2280, 12),
                      'stage90_guarded_write32_store_arm': (0x2300, 36),
                      'stage90_guarded_write32_fault': (0x2308, 4),
@@ -240,6 +244,40 @@ class Fixture:
                     self.word(address+index*4, value)
             self.payload = self.payload.replace(MARKERS[-1], b'X'*len(MARKERS[-1]))
             marker = RPM_START+b'\0'+RPM_FINISH+b'\0'
+            self.payload[0x1600:0x1600+len(marker)] = marker
+        if spmi_s2_read:
+            self.config += '#define STAGE90_SPMI_S2_READ 1\n'
+            self.nm += ('00001c00 00000004 T spmi_s2_read\n'
+                        '00001f00 00000008 t spmi_probe_read\n'
+                        '00001f40 00000008 t spmi_probe_write\n'
+                        '00002800 00000008 R spmi_s2_read_commands\n'
+                        '00002840 00000010 R spmi_s2_read_registers\n')
+            # The common store fixture already supplies RR,RWRW.
+            self.dis = self.dis.replace('  1414: eb000000 bl 2280 <stage90_guarded_write32>',
+                '  1414: eb000000 bl 2280 <stage90_guarded_write32>\n'
+                '  1418: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                '  141c: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                '  1420: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                '  1424: eb000000 bl 1c00 <spmi_s2_read>')
+            self.dis += ('00001c00 <spmi_s2_read>:\n'
+                         '  1c00: e12fff1e bx lr\n'
+                         '00001f00 <spmi_probe_read>:\n'
+                         '  1f00: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                         '  1f04: e12fff1e bx lr\n'
+                         '00001f40 <spmi_probe_write>:\n'
+                         '  1f40: eb000000 bl 2280 <stage90_guarded_write32>\n'
+                         '  1f44: e12fff1e bx lr\n')
+            self.word(0x1c00, 0xe12fff1e)
+            for address, target in ((0x1f00, 0x1040), (0x1f40, 0x2280)):
+                self.word(address, branch(address, target, 0xeb000000))
+                self.word(address+4, 0xe12fff1e)
+            for address, values in ((0x2800, (0x08517401, 0x08517451)),
+                                    (0x2840, (0xfc4cf000, 0xfc4cf808, 0xfc4caf20, 0xfc4cf818))):
+                for index, value in enumerate(values):
+                    self.word(address+index*4, value)
+            self.payload = self.payload.replace(STORE_START, b'X'*len(STORE_START))
+            self.payload = self.payload.replace(STORE_FINISH, b'X'*len(STORE_FINISH))
+            marker = SPMI_START+b'\0'+SPMI_FINISH+b'\0'
             self.payload[0x1600:0x1600+len(marker)] = marker
         if irq_only:
             self.config += '#define STAGE90_GUARDED_IRQ_ONLY 1\n'
@@ -373,7 +411,8 @@ class CheckerTests(unittest.TestCase):
                                     clock_snapshot=fixture.clock_snapshot,
                                     root_snapshot=fixture.root_snapshot,
                                     store_selftest=fixture.store_selftest,
-                                    rpm_snapshot=fixture.rpm_snapshot)
+                                    rpm_snapshot=fixture.rpm_snapshot,
+                                    spmi_s2_read=fixture.spmi_s2_read)
             return output.getvalue(), calls.call_count
 
     def test_complete_positive_fixture(self):
@@ -1026,12 +1065,189 @@ class CheckerTests(unittest.TestCase):
                     CHECKER.main()
             self.assertEqual(error.exception.code, 2)
 
+    def test_spmi_s2_positive_inline_and_outlined(self):
+        for guard, store in ((False, False), (True, False), (False, True), (True, True)):
+            fixture = Fixture(irq_only=True, spmi_s2_read=True)
+            self.outline_selftests(fixture, guard, store)
+            with self.subTest(guard=guard, store=store):
+                output, calls = self.inspect_fixture(fixture)
+                self.assertIn('PASS:', output)
+                self.assertIn('no universal CFG, ADC, current-voltage, supply-floor', output)
+                self.assertEqual(calls, 3)
+
+    def test_spmi_s2_configuration_and_cross_modes(self):
+        original = Fixture(irq_only=True, spmi_s2_read=True)
+        for name in ('SPMI_S2_READ', 'GUARDED_STORE32', 'GUARDED_IRQ_ONLY',
+                     'DWC3_READONLY', 'DWC3_TARGET_READS'):
+            for value in ('0', '2', '-1', 'SPMI_ALIAS', None):
+                fixture = copy.deepcopy(original)
+                if value is None:
+                    fixture.config = re.sub(r'#define STAGE90_'+name+r' \S+\n', '', fixture.config)
+                else:
+                    fixture.define(name, value)
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    self.inspect_fixture(fixture)
+        for name in ('GUARDED_STORE_SELFTEST', 'DWC3_CLOCK_SNAPSHOT',
+                     'DWC3_ROOT_SNAPSHOT', 'RPM_RBCPR_SNAPSHOT'):
+            fixture = copy.deepcopy(original)
+            if name == 'GUARDED_STORE_SELFTEST':
+                fixture.define(name, '1')
+            else:
+                fixture.config += '#define STAGE90_'+name+' 1\n'
+            with self.assertRaisesRegex(ValueError, name):
+                self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        for name in ('SPMI_S2_READ', 'GUARDED_STORE32', 'GUARDED_IRQ_ONLY', 'DWC3_TARGET_READS'):
+            fixture.define(name, '0x1ULL')
+        fixture.define('GUARDED_STORE_SELFTEST', '0UL')
+        self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+        for other in ('recovery_only', 'clock_snapshot', 'root_snapshot', 'store_selftest', 'rpm_snapshot'):
+            fixture = copy.deepcopy(original)
+            setattr(fixture, other, True)
+            with self.assertRaisesRegex(ValueError, 'mutually exclusive'):
+                self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        fixture.irq_only = False
+        with self.assertRaisesRegex(ValueError, 'requires --irq-only'):
+            self.inspect_fixture(fixture)
+        for mode in ({}, {'irq_only': True}, {'recovery_only': True}, {'clock_snapshot': True},
+                     {'root_snapshot': True}, {'irq_only': True, 'store_selftest': True},
+                     {'irq_only': True, 'rpm_snapshot': True}):
+            fixture = Fixture(**mode)
+            self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+            fixture.config += '#define STAGE90_SPMI_S2_READ 0\n'
+            self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+            fixture.define('SPMI_S2_READ', '1')
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'SPMI_S2_READ'):
+                self.inspect_fixture(fixture)
+
+    def test_spmi_s2_raw_tables_symbols_and_store_leaf(self):
+        original = Fixture(irq_only=True, spmi_s2_read=True)
+        for name, address, count in (('spmi_s2_read_commands', 0x2800, 2),
+                                     ('spmi_s2_read_registers', 0x2840, 4)):
+            for index in range(count):
+                fixture = copy.deepcopy(original)
+                fixture.word(address+index*4, 0xfc4cf810)  # WDATA is never a read-table entry/CMD.
+                self.assertEqual((fixture.nm, fixture.dis), (original.nm, original.dis))
+                with self.subTest(table=name, index=index), self.assertRaisesRegex(ValueError, 'SPMI S2 table'):
+                    self.inspect_fixture(fixture)
+            for changes in ({'size': count*4-4}, {'remove': True}, {'address': 0x28fc}):
+                fixture = copy.deepcopy(original)
+                fixture.symbol(name, **changes)
+                with self.subTest(table=name, changes=changes), self.assertRaisesRegex(ValueError, 'SPMI S2 table|unbacked'):
+                    self.inspect_fixture(fixture)
+        for name in ('spmi_s2_read', 'spmi_probe_read', 'spmi_probe_write'):
+            for changes in ({'size': 0}, {'remove': True}, {'address': 0x2900}):
+                fixture = copy.deepcopy(original)
+                fixture.symbol(name, **changes)
+                with self.assertRaisesRegex(ValueError, 'missing linked symbol|unbacked'):
+                    self.inspect_fixture(fixture)
+        for changes in ({'size': 52}, {'remove': True}):
+            fixture = copy.deepcopy(original)
+            fixture.symbol('stage90_guarded_read32_state', **changes)
+            with self.assertRaisesRegex(ValueError, 'state B-symbol size'):
+                self.inspect_fixture(fixture)
+        for address, word, error in (
+                (0x2308, 0xe5811000, 'guarded-store opcodes'),
+                (0x2308, 0xe5802000, 'guarded-store opcodes'),
+                (0x2300, 0xe5801000, 'guarded-store opcodes'),
+                (0x230c, 0xe5801000, 'guarded-store opcodes'),
+                (0x231c, 0xe3a00000, 'guarded-store opcodes'),
+                (0x231c, 0xe5801000, 'guarded-store opcodes'),
+                (0x2280, 0xe1a00000, 'store wrapper'),
+                (0x2284, branch(0x2284, 0x1000, 0xeb000000), 'store wrapper'),
+                (0x100c, 0xe5802000, 'guarded-load opcodes'),
+                (0x1844, 0xe588901c, 'park opcodes')):
+            fixture = copy.deepcopy(original)
+            fixture.word(address, word)
+            self.assertEqual((fixture.nm, fixture.dis), (original.nm, original.dis))
+            with self.subTest(address=hex(address)), self.assertRaisesRegex(ValueError, error):
+                self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        fixture.symbol('stage90_guarded_write32_fault', address=0x230c)
+        with self.assertRaisesRegex(ValueError, 'label layout'):
+            self.inspect_fixture(fixture)
+
+    def test_spmi_s2_calls_helpers_and_markers(self):
+        original = Fixture(irq_only=True, spmi_s2_read=True)
+        cases = [
+            ('missing core', 'exactly once', 'bl 1c00 <spmi_s2_read>', 'b 1c00 <spmi_s2_read>'),
+            ('double core', 'exactly once', 'bl 1c00 <spmi_s2_read>', 'bl 1c00 <spmi_s2_read>\n bl 1c00 <spmi_s2_read>'),
+            ('missing preflight read', 'exactly seven', '  1418: eb000000 bl 1040 <stage90_guarded_read32>', '  1418: eb000000 b 1040 <stage90_guarded_read32>'),
+            ('extra preflight write', 'exactly seven', '  140c: eb000000 bl 2280 <stage90_guarded_write32>', '  140c: eb000000 bl 2280 <stage90_guarded_write32>\n bl 2280 <stage90_guarded_write32>'),
+            ('read adapter absent call', 'read callback must', '  1f00: eb000000 bl 1040 <stage90_guarded_read32>', '  1f00: eb000000 b 1040 <stage90_guarded_read32>'),
+            ('write adapter absent call', 'write callback must', '  1f40: eb000000 bl 2280 <stage90_guarded_write32>', '  1f40: eb000000 b 2280 <stage90_guarded_write32>'),
+            ('write adapter double call', 'write callback must', '  1f40: eb000000 bl 2280 <stage90_guarded_write32>', '  1f40: eb000000 bl 2280 <stage90_guarded_write32>\n bl 2280 <stage90_guarded_write32>'),
+            ('read adapter write', 'read callback must', '  1f04: e12fff1e bx lr', ' bl 2280 <stage90_guarded_write32>'),
+            ('write adapter read', 'write callback must', '  1f44: e12fff1e bx lr', ' bl 1040 <stage90_guarded_read32>'),
+        ]
+        for name, error, old, new in cases:
+            fixture = copy.deepcopy(original)
+            fixture.dis = fixture.dis.replace(old, new, 1)
+            with self.subTest(case=name), self.assertRaisesRegex(ValueError, error):
+                self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        fixture.dis = fixture.dis.replace('  1424: eb000000 bl 1c00 <spmi_s2_read>', '').replace('  1400:', ' bl 1c00 <spmi_s2_read>\n  1400:', 1)
+        with self.assertRaisesRegex(ValueError, 'precedes read/store'):
+            self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        fixture.dis = fixture.dis.replace('  1400: ebffff0e bl 1040 <stage90_guarded_read32>',
+            '  1400: eb000000 bl 2280 <stage90_guarded_write32>').replace(
+            '  140c: eb000000 bl 2280 <stage90_guarded_write32>',
+            '  140c: eb000000 bl 1040 <stage90_guarded_read32>')
+        with self.assertRaisesRegex(ValueError, 'must follow'):
+            self.inspect_fixture(fixture)
+        for api in ('stage90_guarded_read32', 'stage90_guarded_write32'):
+            fixture = copy.deepcopy(original)
+            fixture.dis = fixture.dis.replace('  1c00:', ' bl 1040 <'+api+'>\n  1c00:', 1)
+            with self.assertRaisesRegex(ValueError, 'core must use callbacks'):
+                self.inspect_fixture(fixture)
+        for name in ('mi4_dwc3_identify', 'mi4_dwc3_clock_snapshot', 'mi4_dwc3_root_snapshot',
+                     'mi4_rpm_rbcpr_snapshot', 'dwc3_probe_read', 'rpm_probe_read',
+                     'usb_preboot_run', 'entry_usb_stream_poll'):
+            for location in ('probe', 'read', 'write', 'core', 'helper'):
+                fixture = copy.deepcopy(original)
+                if location == 'helper':
+                    self.outline_selftests(fixture, True, True)
+                    fixture.dis += ' bl 1500 <'+name+'>\n'
+                else:
+                    label = {'probe': '  1400:', 'read': '  1f00:', 'write': '  1f40:', 'core': '  1c00:'}[location]
+                    fixture.dis = fixture.dis.replace(label, ' bl 1500 <'+name+'>\n'+label, 1)
+                with self.subTest(name=name, location=location), self.assertRaisesRegex(ValueError, 'retains? controller|non-RPM probe'):
+                    self.inspect_fixture(fixture)
+        for marker in (SPMI_START, SPMI_FINISH):
+            fixture = copy.deepcopy(original)
+            fixture.payload = fixture.payload.replace(marker, b'X'*len(marker))
+            with self.assertRaisesRegex(ValueError, 'diagnostic'):
+                self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        self.outline_selftests(fixture, True, True)
+        fixture.dis = fixture.dis.replace('bl 1e00 <dwc3_probe_store_selftest>', 'b 1e00 <dwc3_probe_store_selftest>')
+        with self.assertRaisesRegex(ValueError, 'directly called exactly once'):
+            self.inspect_fixture(fixture)
+        for mode in ({}, {'recovery_only': True}, {'clock_snapshot': True}, {'root_snapshot': True},
+                     {'irq_only': True, 'store_selftest': True}, {'irq_only': True, 'rpm_snapshot': True}):
+            fixture = Fixture(**mode)
+            fixture.dis = fixture.dis.replace('  1400:', ' bl 1c00 <spmi_s2_read>\n  1400:', 1)
+            with self.assertRaisesRegex(ValueError, 'non-SPMI probe'):
+                self.inspect_fixture(fixture)
+
+    def test_spmi_s2_cli_exclusions_and_irq_requirement(self):
+        required = ['checker', '--payload', 'p', '--entry', 'e', '--config', 'c']
+        for mode in ('--clock-snapshot', '--root-snapshot', '--store-selftest', '--rpm-snapshot', '--recovery-only', None):
+            flags = ['--spmi-s2-read'] if mode is None else ['--irq-only', '--spmi-s2-read', mode]
+            with mock.patch.object(sys, 'argv', required+flags), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    CHECKER.main()
+            self.assertEqual(error.exception.code, 2)
+
     def test_cli_modes_are_explicit(self):
         required = ['--payload', 'p', '--entry', 'e', '--config', 'c']
         for flags in ([], ['--irq-only'], ['--irq-only', '--recovery-only'],
                       ['--clock-snapshot'], ['--irq-only', '--clock-snapshot'],
                       ['--root-snapshot'], ['--irq-only', '--root-snapshot'],
-                      ['--irq-only', '--store-selftest'], ['--irq-only', '--rpm-snapshot']):
+                      ['--irq-only', '--store-selftest'], ['--irq-only', '--rpm-snapshot'],
+                      ['--irq-only', '--spmi-s2-read']):
             with self.subTest(flags=flags), mock.patch.object(sys, 'argv', ['checker']+required+flags):
                 with mock.patch.object(CHECKER, 'inspect') as inspect:
                     CHECKER.main()
@@ -1040,7 +1256,8 @@ class CheckerTests(unittest.TestCase):
                         clock_snapshot='--clock-snapshot' in flags,
                         root_snapshot='--root-snapshot' in flags,
                          store_selftest='--store-selftest' in flags,
-                         rpm_snapshot='--rpm-snapshot' in flags)
+                         rpm_snapshot='--rpm-snapshot' in flags,
+                         spmi_s2_read='--spmi-s2-read' in flags)
 
 
 class ElfReaderTests(unittest.TestCase):

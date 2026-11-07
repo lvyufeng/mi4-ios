@@ -258,6 +258,60 @@ power-off evidence, and this source lacks a producer/validity/freshness contract
 Supply level remains UNKNOWN. This statistics path is not being expanded merely
 to obtain write approval; the master-root transaction remains undeployed.
 
+## Fixed SPMI S2 reads: controller commands, not voltage writes
+
+`src/spmi_s2_read.{c,h}` implements two normal EXT_READL transactions against the
+actual device-tree-declared v1 arbiter, channel 0 / EE0, PM8841 SID5 S2. The
+resource node name is not its register base: the actual core is `0xfc4cf000`.
+S2 control is `0x1700`, with the supplier's FTSMPS type correction. Only these
+controller CMD stores are permitted, in order:
+
+- `0xfc4cf800 <- 0x08517401`: read RANGE/VSET at PMIC `0x1740/0x1741`.
+- `0xfc4cf800 <- 0x08517451`: read MODE/ENABLE at `0x1745/0x1746`.
+
+These are intentional **controller writes to request reads**, not PMIC voltage
+writes. The legacy DWC3 source introduction describes its original mode, not the
+new S2 transaction mode. No WDATA, CONFIG, IRQ, owner, channel, security-routing,
+GCC or RPM-vote write is included. DENIED, unknown status, fault or timeout stops
+immediately; no retry, rollback, alternate channel or permission change follows.
+The raw controller version is metadata, not an invented authorization predicate.
+
+The default-OFF `STAGE90_SPMI_S2_READ` requires guarded STORE capability but
+excludes the standalone STORE_SELFTEST and other target modes. It reruns the
+read/fault and RAM-store/fault selftests in the same boot, then checks the live
+watchdog before entering the core. The maximum is 207 target reads, two CMD
+stores, 100 status polls per transaction and 198 one-microsecond delays. Only
+exact DONE=1 permits RDATA. The existing normal write/barrier/status protocol
+accepts an old DONE; it does not independently prove a new completion epoch.
+The 10ms admission checks cannot force a stuck bus access to finish.
+
+The decoded voltage is the **programmed setpoint** under the source-defined
+FTSMPS conversion, and MODE/ENABLE bits are requests. Neither a 900mV reference
+comparison nor an enable bit is an ADC reading, a physical supply floor, PWRGOOD,
+a lasting corner vote or clock-write authorization. The large diagnostic report
+uses static storage; standalone ARM compilation measured an 88-byte maximum
+individual core frame. Final linked code used a 72-byte core frame and an 88-byte
+probe frame, with no large stack temporary.
+
+```sh
+python3 tools/test_spmi_s2_read.py --cc clang --sanitize
+python3 tools/test_spmi_s2_capture.py
+python3 tools/check_spmi_s2_capture.py /ABS/PRIVATE/recovered-console
+```
+
+The canonical profile is `tools/build_profile_d13_spmi_s2_read.json` (five stages,
+35 acceptance commands). Consult the milestone record for actual runtime status;
+offline or linked checks alone are not device or supply proof.
+
+One real RAM boot has now passed all 35 acceptance commands / 147 linked checks,
+completed nine target reads and both fixed CMD writes, and recovered Android.
+The result was RANGE0/VSET206 = **1,030,000µV programmed setpoint**, MODE/ENABLE
+`0x80/0x80`, AUTO clear. This is valid normal programmed-control evidence; no
+further S2 sampling or ADC gate is required to acknowledge it. It does not supply
+the missing platform-specific relation between that setpoint and RPM NORMAL.
+The next path is ordinary bounded RPM endpoint/transport initialization and a
+matching NORMAL+enable ACK, not more opaque statistics or arbitrary thresholds.
+
 ## Hardware boundary
 
 The EP0 planner commits **software** address/configuration after matching STATUS

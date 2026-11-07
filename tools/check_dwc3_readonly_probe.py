@@ -123,7 +123,7 @@ def inspect_irq_only(at, symbols, require):
 
 def inspect(payload, entry, config, irq_only=False, recovery_only=False,
             clock_snapshot=False, root_snapshot=False, store_selftest=False,
-            rpm_snapshot=False):
+            rpm_snapshot=False, spmi_s2_read=False):
     checks = 0
 
     def require(test, message):
@@ -132,10 +132,13 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
         if not test:
             raise ValueError(message)
 
-    require(sum((recovery_only, clock_snapshot, root_snapshot, store_selftest, rpm_snapshot)) <= 1,
+    require(sum((recovery_only, clock_snapshot, root_snapshot, store_selftest,
+                 rpm_snapshot, spmi_s2_read)) <= 1,
             'snapshot, recovery-only and store-selftest modes are mutually exclusive')
     require(not store_selftest or irq_only, 'store-selftest requires --irq-only')
     require(not rpm_snapshot or irq_only, 'rpm-snapshot requires --irq-only')
+    require(not spmi_s2_read or irq_only, 'spmi-s2-read requires --irq-only')
+    store_enabled = store_selftest or spmi_s2_read
     defines = {}
     for line in config.read_text().splitlines():
         m = re.fullmatch(r'#define (STAGE90_\w+) (\S+)', line)
@@ -155,10 +158,12 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
     require(irq_literal is not None and int(irq_literal[1], 0) == int(irq_only),
             'actual payload configuration differs or is unexpanded: GUARDED_IRQ_ONLY')
 
-    for name in ('GUARDED_STORE32', 'GUARDED_STORE_SELFTEST'):
-        raw = defines.get('STAGE90_'+name, '' if store_selftest else '0')
+    for name, wanted in (('GUARDED_STORE32', store_enabled),
+                         ('GUARDED_STORE_SELFTEST', store_selftest),
+                         ('SPMI_S2_READ', spmi_s2_read)):
+        raw = defines.get('STAGE90_'+name, '' if wanted else '0')
         literal = re.fullmatch(r'(0[xX][0-9a-fA-F]+|0|[1-9][0-9]*)(?:[uU](?:[lL]{1,2})?|[lL]{1,2}[uU]?)?', raw)
-        require(literal is not None and int(literal[1], 0) == int(store_selftest),
+        require(literal is not None and int(literal[1], 0) == int(wanted),
                 'actual payload configuration differs or is unexpanded: '+name)
 
     raw_rpm = defines.get('STAGE90_RPM_RBCPR_SNAPSHOT', '' if rpm_snapshot else '0')
@@ -200,9 +205,9 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
         m = re.fullmatch(r'([0-9a-fA-F]+) ([0-9a-fA-F]+) (\w) (\S+)', line)
         if m:
             symbol_types[m[4]] = m[3]
-    if store_selftest or rpm_snapshot:
+    if store_enabled or rpm_snapshot:
         state = symbols.get('stage90_guarded_read32_state')
-        require(state is not None and state[1] == (56 if store_selftest else 52) and
+        require(state is not None and state[1] == (56 if store_enabled else 52) and
                 symbol_types.get('stage90_guarded_read32_state') in ('b', 'B'),
                 'actual guard state B-symbol size differs')
     if rpm_snapshot:
@@ -219,6 +224,21 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
             require(offsets is not None and offsets[1] == 40 and
                     at(offsets[0], 40) == expected_offsets,
                     'RPM snapshot offset table opcodes/data/size differ: '+name)
+    if spmi_s2_read:
+        for name in ('spmi_s2_read', 'spmi_probe_read', 'spmi_probe_write'):
+            linked = symbols.get(name)
+            require(linked is not None and linked[1] > 0, 'missing linked symbol '+name)
+            at(linked[0], linked[1], True)
+        # Fixed linked numeric contracts only. The callback protocol, no retry,
+        # address/phase/deadline bounds and per-call intent need source/host tests.
+        for name, expected in (
+                ('spmi_s2_read_commands', (0x08517401, 0x08517451)),
+                ('spmi_s2_read_registers', (0xfc4cf000, 0xfc4cf808, 0xfc4caf20, 0xfc4cf818))):
+            table = symbols.get(name)
+            size = len(expected)*4
+            require(table is not None and table[1] == size and
+                    at(table[0], size) == struct.pack('<'+'I'*len(expected), *expected),
+                    'SPMI S2 table opcodes/data/size differ: '+name)
     if irq_only:
         inspect_irq_only(at, symbols, require)
     for name in ('stage90_guarded_read32', 'stage90_guarded_read32_abort_policy',
@@ -264,7 +284,7 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
             struct.pack('<3I', 0xf10c00c0, 0xe320f002, 0xeafffffd),
             'unsupported-fault park is not the expected store-free loop')
 
-    if store_selftest:
+    if store_enabled:
         for name in ('stage90_guarded_write32', 'stage90_guarded_write32_store_arm',
                      'stage90_guarded_write32_fault', 'stage90_guarded_write32_recovery'):
             require(name in symbols and symbols[name][1] > 0, 'missing linked symbol '+name)
@@ -365,11 +385,11 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
             'legacy CI preboot call remains in actual kernel entry')
     probe = body('stage90_dwc3_readonly_probe')
     inhibited = b'dwc3_ro recovery verified; controller target reads inhibited'
-    if not store_selftest:
+    if not store_enabled:
         require('<stage90_guarded_write32>' not in probe and
                 '<dwc3_probe_store_selftest>' not in probe,
                 'non-store probe retains guarded store calls')
-    if store_selftest:
+    if store_enabled:
         # Only these two source-known helpers may be outlined. Expand exactly
         # one direct probe BL each, never arbitrary transitive reachability.
         selected = probe
@@ -390,12 +410,52 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
                          'usb_preboot_', 'entry_usb_')),
                 'store-selftest probe/helpers retain controller/core/stream callback references')
         guard_calls = re.findall(r'\bbl\b[^\n]*<(stage90_guarded_(?:read|write)32)>', selected)
-        require(guard_calls.count('stage90_guarded_read32') == 4 and
+        require(guard_calls.count('stage90_guarded_read32') == (7 if spmi_s2_read else 4) and
                 guard_calls.count('stage90_guarded_write32') == 2,
+                'SPMI probe/helper must directly call guarded reader exactly seven times and writer exactly twice'
+                if spmi_s2_read else
                 'store-selftest must directly call guarded reader exactly four times and writer exactly twice')
-        require(guard_calls == ['stage90_guarded_read32']*3 +
-                ['stage90_guarded_write32', 'stage90_guarded_read32', 'stage90_guarded_write32'],
+        expected_calls = ['stage90_guarded_read32']*3 + [
+            'stage90_guarded_write32', 'stage90_guarded_read32', 'stage90_guarded_write32']
+        if spmi_s2_read:
+            expected_calls += ['stage90_guarded_read32']*3
+        require(guard_calls == expected_calls,
                 'store-selftest calls must follow read/fault selftest, RAM read/write/read, unmapped write order')
+    if not spmi_s2_read:
+        require(not any('<'+name in probe for name in
+                        ('spmi_s2_read', 'spmi_probe_read', 'spmi_probe_write')),
+                'non-SPMI probe retains SPMI core/callback references')
+        if store_selftest:
+            require(not any('<'+name in selected for name in
+                            ('spmi_s2_read', 'spmi_probe_read', 'spmi_probe_write')),
+                    'store-selftest helpers retain SPMI references')
+    if spmi_s2_read:
+        read_callback, write_callback = body('spmi_probe_read'), body('spmi_probe_write')
+        core = body('spmi_s2_read')
+        combined = selected+'\n'+read_callback+'\n'+write_callback+'\n'+core
+        forbidden = ('mi4_dwc3_identify', 'mi4_dwc3_clock_snapshot',
+                     'mi4_dwc3_root_snapshot', 'mi4_rpm_rbcpr_snapshot',
+                     'dwc3_probe_read', 'rpm_probe_read', 'usb_preboot_', 'entry_usb_')
+        require(not any('<'+name in combined for name in forbidden),
+                'SPMI probe/helper/core/callback retains controller/RPM/stream references')
+        require(len(re.findall(r'\bbl\b[^\n]*<stage90_guarded_read32>', read_callback)) == 1 and
+                '<stage90_guarded_write32' not in read_callback,
+                'SPMI read callback must directly call guarded reader exactly once and never writer')
+        require(len(re.findall(r'\bbl\b[^\n]*<stage90_guarded_write32>', write_callback)) == 1 and
+                '<stage90_guarded_read32>' not in write_callback,
+                'SPMI write callback must directly call guarded writer exactly once and never reader')
+        require('<stage90_guarded_read32>' not in core and
+                '<stage90_guarded_write32' not in core,
+                'SPMI core must use callbacks, not direct guarded APIs')
+        core_reference = r'\bbl\b[^\n]*<spmi_s2_read>'
+        require(len(re.findall(core_reference, probe)) == 1 and
+                len(re.findall(core_reference, selected)) == 1 and
+                not any('<spmi_s2_read>' in text for text in (read_callback, write_callback, core)),
+                'SPMI probe must directly call S2 core exactly once')
+        core_position = re.search(core_reference, selected).start()
+        guard_positions = list(re.finditer(r'\bbl\b[^\n]*<stage90_guarded_(?:read|write)32>', selected))
+        require(all(call.start() < core_position for call in guard_positions),
+                'SPMI core precedes read/store selftests or live watchdog reads')
     if not rpm_snapshot:
         require('<mi4_rpm_rbcpr_snapshot>' not in probe and '<rpm_probe_read>' not in probe,
                 'non-RPM probe retains RPM core/callback references')
@@ -435,7 +495,7 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
     if not root_snapshot:
         require('<mi4_dwc3_root_snapshot>' not in probe,
                 'non-root probe retains root-snapshot core call')
-    if store_selftest or rpm_snapshot:
+    if store_enabled or rpm_snapshot:
         pass  # The bounded combined probe/helper call contract was checked above.
     elif recovery_only:
         require('<mi4_dwc3_identify>' not in probe and '<mi4_dwc3_clock_snapshot>' not in probe and
@@ -466,7 +526,8 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
                 'probe lacks guarded reader or actual identity core')
         require(probe.index('<stage90_guarded_read32>') < probe.index('<mi4_dwc3_identify>'),
                 'identity core precedes guarded-load selftest')
-    finish = (b'rpm_ro finished; sampled telemetry only; no clock-write authorization' if rpm_snapshot else
+    finish = (b'spmi_ro finished; programmed setpoint only; no clock-write authorization' if spmi_s2_read else
+              b'rpm_ro finished; sampled telemetry only; no clock-write authorization' if rpm_snapshot else
               b'dwc3_ro store selftest passed; RAM writes only; controller target reads inhibited' if store_selftest else
               inhibited if recovery_only else
               b'dwc3_ro finished; GCC root snapshot only; no DWC3 core reads' if root_snapshot else
@@ -478,6 +539,9 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
     if rpm_snapshot:
         require(b'RPM RBCPR V2 read-only snapshot; no clock or supply writes' in data,
                 'missing linked diagnostic for RPM RBCPR snapshot start')
+    if spmi_s2_read:
+        require(b'SPMI PM8841 S2 read transactions; no PMIC voltage writes' in data,
+                'missing linked diagnostic for SPMI S2 read start')
     for marker in (b'dwc3_ro guard selftest passed: RAM and translation-fault recovery',
                    b'dwc3_ro skipped: guard translation-fault selftest failed',
                    b'mmu legacy CI USB probe skipped; primary port is DWC3', finish):
@@ -495,6 +559,8 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
                 'entry USB function is not a bare return: '+name)
     print('PASS:', checks, 'actual linked probe/config/opcode/CI-disabled checks')
     print('LIMIT: static acceptance only; no ARM exception, MMIO completion, or USB proof')
+    if spmi_s2_read:
+        print('LIMIT: SPMI linked tables/direct calls only; source and host tests must establish per-call CMD intent, address/poll/deadline bounds and no-retry policy; no universal CFG, ADC, current-voltage, supply-floor or clock-write authorization proof')
     if rpm_snapshot:
         print('LIMIT: RPM linked tables/direct calls only; source and host tests must establish address/phase/deadline policy; no runtime mapping, universal CFG, supply-health or clock-write authorization proof')
     if store_selftest:
@@ -519,7 +585,11 @@ def main():
                       help='require IRQ-only RAM/unmapped guarded-store selftests; target reads inhibited')
     mode.add_argument('--rpm-snapshot', action='store_true',
                       help='require IRQ-only RPM RBCPR V2 telemetry; no clock-write authorization')
+    mode.add_argument('--spmi-s2-read', action='store_true',
+                      help='require guarded SPMI PM8841 S2 read transactions; no PMIC voltage-write authorization')
     args = parser.parse_args()
+    if args.spmi_s2_read and not args.irq_only:
+        parser.error('--spmi-s2-read requires --irq-only')
     if args.rpm_snapshot and not args.irq_only:
         parser.error('--rpm-snapshot requires --irq-only')
     if args.store_selftest and not args.irq_only:
@@ -527,7 +597,7 @@ def main():
     inspect(args.payload, args.entry, args.config, irq_only=args.irq_only,
             recovery_only=args.recovery_only, clock_snapshot=args.clock_snapshot,
             root_snapshot=args.root_snapshot, store_selftest=args.store_selftest,
-            rpm_snapshot=args.rpm_snapshot)
+            rpm_snapshot=args.rpm_snapshot, spmi_s2_read=args.spmi_s2_read)
 
 
 if __name__ == '__main__':
