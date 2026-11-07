@@ -118,17 +118,41 @@ explains why CI register readbacks and CI-only model tests do not establish a
 working physical phone link. It does not measure the bootloader's exact mux/power
 state or prove a DWC3 implementation already works.
 
-The next independent build disables both preboot and XNU-side CI initialization
-and diagnostics, retains all medium-write gates and broad compatibility OFF,
-and enables a bounded, copyin/copyinstr-only dyld error witness. Its actual C
-functions passed Clang and GCC regression tests in 32/64-bit address-size models
-(41 cases per model) plus three negative controls. It preserves the saved PC and
-exception delivery; it does not skip dyld's fatal instruction. Runtime error
-recovery and actual linked configuration remain separate acceptance gates.
+The independent witness build completed all five stages and **20 final checks**.
+Its image SHA256 is:
+
+`1b4582dfc292f9e7c9887d122c3a97b72059a3a1b226b453dcf9400eb9bede19`
+
+A subsequent single bounded RAM boot printed both obsolete-CI skip markers.
+All four linked XNU USB entry functions were independently checked as bare
+returns. All medium-write gates and broad compatibility remained OFF. Android
+recovered within the observation deadline; no USB reader or second boot was used.
+
+The bounded witness recovered the **actual next error**, twice, with matching
+successful reads through dyld's errorMessage field and saved r5:
+
+```text
+Library not loaded: /usr/lib/libbsm.0.dylib
+  Referenced from: /sbin/launchd
+  Reason: image not found
+```
+
+The logger replaces newline characters with `?`; the displayed lines above restore
+that formatting. This is now a hardware-proven missing-library blocker, not merely
+an inventory inference. It is not proof that satisfying one library completes
+launchd or its dependency closure.
+
+One legacy diagnostic must not be overinterpreted: in this dyld's version-0x0e
+all-image-info structure, offset `+0x64` is **reserved[0]**, not a cache base. The
+old `cacheBase=0` label therefore does not measure cache mapping. The error text
+comes from separate successful bounded reads and remains valid. The witness does
+not skip the fatal instruction or claim universal undefined-instruction handling.
 
 DWC3 needs its own event ring, endpoint commands and TRBs; changing the CI base
-address is not a port. Offline, revision-aware event/EP0 work precedes any new
-bounded hardware identification or initialization.
+address is not a port. An original offline event decoder/consumer now checks the
+actual supplier event formats, wrap-safe byte counts, budgets and framing refusal.
+Clang/GCC native tests and sanitizer tests passed; no event-ring or EP0 hardware
+adapter has been integrated. These tests are not USB connectivity evidence.
 
 ### Root-system provenance and capacity
 
