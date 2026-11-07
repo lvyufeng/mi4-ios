@@ -50,6 +50,22 @@ static int supported_read_fault(uint32_t dfsr)
     }
 }
 
+#if STAGE90_GUARDED_STORE32
+static int supported_fault(uint32_t dfsr, int write)
+{
+    uint32_t status = (dfsr & 0x0fu) | ((dfsr >> 6) & 0x10u);
+    /* External abort WnR semantics are not established: never recover writes
+     * for synchronous external or table-walk external classes, even WnR=1.
+     * Reads retain the unchanged eleven-class policy below.
+     */
+    if (write && (status == 0x08u || status == 0x0cu || status == 0x0eu))
+        return 0;
+    /* ARMv7 short-descriptor DFSR.WnR is bit 11; never weaken read mask. */
+    return ((dfsr & 0x800u) != 0u) == write &&
+        supported_read_fault(dfsr & ~0x800u);
+}
+#endif
+
 enum stage90_guarded_abort_result stage90_guarded_read32_abort_policy(
     volatile struct stage90_guarded_read32_state *state,
     uint32_t *frame, uint32_t dfsr, uint32_t dfar, uint32_t saved_cpsr)
@@ -62,8 +78,17 @@ enum stage90_guarded_abort_result stage90_guarded_read32_abort_policy(
 
     accepted = state->active == 1u && frame != 0 &&
         state->status == STAGE90_GUARDED_ARMED && state->fault_count == 0u &&
+#if STAGE90_GUARDED_STORE32
+        ((state->operation == 0u &&
+          state->fault_pc == (uint32_t)(uintptr_t)stage90_guarded_read32_fault &&
+          state->recovery_pc == (uint32_t)(uintptr_t)stage90_guarded_read32_recovery) ||
+         (state->operation == 1u &&
+          state->fault_pc == (uint32_t)(uintptr_t)stage90_guarded_write32_fault &&
+          state->recovery_pc == (uint32_t)(uintptr_t)stage90_guarded_write32_recovery)) &&
+#else
         state->fault_pc == (uint32_t)(uintptr_t)stage90_guarded_read32_fault &&
         state->recovery_pc == (uint32_t)(uintptr_t)stage90_guarded_read32_recovery &&
+#endif
         frame[5] == state->fault_pc &&
         (state->expected_address & 3u) == 0u &&
         dfar == state->expected_address &&
@@ -73,7 +98,11 @@ enum stage90_guarded_abort_result stage90_guarded_read32_abort_policy(
 #else
         svc_arm_little_endian(saved_cpsr) && (saved_cpsr & 0xc0u) == 0xc0u &&
 #endif
+#if STAGE90_GUARDED_STORE32
+        supported_fault(dfsr, state->operation == 1u);
+#else
         supported_read_fault(dfsr);
+#endif
 
     /* RAM breadcrumb before returning a disposition; no logger can fault here.
      * Any fault in this capture is off-LDR and MUST fail-stop, never +4 skip.
@@ -83,7 +112,12 @@ enum stage90_guarded_abort_result stage90_guarded_read32_abort_policy(
     state->observed_pc = frame != 0 ? frame[5] : 0u;
     state->observed_spsr = saved_cpsr;
     state->fault_count = 1u; /* at most one recorded fault per call */
+#if STAGE90_GUARDED_STORE32
+    state->status = accepted ? (state->operation == 1u ? STAGE90_GUARDED_WRITE_FAULT :
+        STAGE90_GUARDED_FAULT) : STAGE90_GUARDED_UNSUPPORTED_STATUS;
+#else
     state->status = accepted ? STAGE90_GUARDED_FAULT : STAGE90_GUARDED_UNSUPPORTED_STATUS;
+#endif
     state->breadcrumb = accepted ? 0x47524431u : 0x47524458u; /* GRD1 / GRDX */
     compiler_barrier();
     if (!accepted)
@@ -125,6 +159,9 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
         stage90_guarded_read32_irq_restore(saved_cpsr);
         return STAGE90_GUARDED_BAD_CONTEXT;
     }
+#if STAGE90_GUARDED_STORE32
+    state->operation = 0u;
+#endif
     state->expected_address = address;
     state->fault_pc = (uint32_t)(uintptr_t)stage90_guarded_read32_fault;
     state->recovery_pc = (uint32_t)(uintptr_t)stage90_guarded_read32_recovery;
@@ -160,3 +197,67 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
     stage90_guarded_read32_irq_restore(saved_cpsr);
     return rc;
 }
+
+#if STAGE90_GUARDED_STORE32
+int stage90_guarded_write32(uint32_t address, uint32_t value)
+{
+    volatile struct stage90_guarded_read32_state *state = &stage90_guarded_read32_state;
+    uint32_t saved_cpsr;
+    int rc;
+    if ((address & 3u) != 0u)
+        return STAGE90_GUARDED_BAD_ARGUMENT;
+    __asm__ volatile ("" : : "r" (stage90_guarded_fiq_hook_contract) : "memory");
+    saved_cpsr = stage90_guarded_read32_irq_save();
+    if (!svc_arm_little_endian(saved_cpsr))
+        return STAGE90_GUARDED_BAD_CONTEXT; /* helper left masks unchanged */
+    if (state->active != 0u) {
+        stage90_guarded_read32_irq_restore(saved_cpsr);
+        return STAGE90_GUARDED_BUSY;
+    }
+    state->cpsr_before_mask = saved_cpsr;
+    state->cpsr_after_mask = stage90_guarded_read32_cpsr_read();
+    if (!irq_only_context(saved_cpsr, state->cpsr_after_mask)) {
+        state->status = STAGE90_GUARDED_BAD_CONTEXT;
+        stage90_guarded_read32_irq_restore(saved_cpsr);
+        return STAGE90_GUARDED_BAD_CONTEXT;
+    }
+    state->operation = 1u;
+    state->expected_address = address;
+    state->fault_pc = (uint32_t)(uintptr_t)stage90_guarded_write32_fault;
+    state->recovery_pc = (uint32_t)(uintptr_t)stage90_guarded_write32_recovery;
+    state->fault_dfsr = 0u;
+    state->fault_dfar = 0u;
+    state->fault_count = 0u;
+    state->observed_pc = 0u;
+    state->observed_spsr = 0u;
+    state->breadcrumb = 0u;
+    state->status = STAGE90_GUARDED_ARMED;
+    compiler_barrier();
+    state->active = 1u;
+    compiler_barrier();
+    rc = stage90_guarded_write32_store_arm(address, value);
+    compiler_barrier();
+    if (state->operation != 1u || state->expected_address != address ||
+        state->fault_pc != (uint32_t)(uintptr_t)stage90_guarded_write32_fault ||
+        state->recovery_pc != (uint32_t)(uintptr_t)stage90_guarded_write32_recovery)
+        goto broken_contract;
+    if (rc == 0 && state->status == STAGE90_GUARDED_ARMED && state->active == 1u &&
+        state->fault_count == 0u) {
+        state->status = STAGE90_GUARDED_OK;
+    } else if (rc == STAGE90_GUARDED_WRITE_FAULT && state->active == 1u &&
+               state->status == STAGE90_GUARDED_WRITE_FAULT && state->fault_count == 1u) {
+        /* No claim that the store did not occur, no retry and no rollback. */
+    } else {
+        goto broken_contract;
+    }
+    compiler_barrier();
+    state->active = 0u;
+    compiler_barrier();
+    stage90_guarded_read32_irq_restore(saved_cpsr);
+    return rc;
+broken_contract:
+    state->status = STAGE90_GUARDED_UNSUPPORTED_STATUS;
+    state->breadcrumb = 0x47524458u;
+    stage90_guarded_read32_park();
+}
+#endif

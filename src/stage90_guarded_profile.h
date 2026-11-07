@@ -12,6 +12,17 @@
 #error "IRQ-only guard requires explicit STAGE90_DWC3_READONLY profile"
 #endif
 
+/* Capability only, not a clock-enable profile or MMIO authorization. */
+#ifndef STAGE90_GUARDED_STORE32
+#define STAGE90_GUARDED_STORE32 0
+#endif
+#if STAGE90_GUARDED_STORE32 != 0 && STAGE90_GUARDED_STORE32 != 1
+#error "STAGE90_GUARDED_STORE32 must be 0 or 1"
+#endif
+#if STAGE90_GUARDED_STORE32 && (!defined(STAGE90_DWC3_READONLY) || STAGE90_DWC3_READONLY != 1 || !STAGE90_GUARDED_IRQ_ONLY)
+#error "Guarded store requires explicit READONLY=1 and IRQ_ONLY=1"
+#endif
+
 /* Shared by C layout assertions and the assembly-only FIQ prefix/park. */
 #define STAGE90_GUARD_ACTIVE_OFFSET 0
 #define STAGE90_GUARD_STATUS_OFFSET 24

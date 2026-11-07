@@ -53,6 +53,131 @@ static void invoke(struct mock *m, struct mi4_dwc3_identity *out,
     CHECK(out->status == expected && m->calls == reads);
     CHECK(memcmp(before,m->values,sizeof(before)) == 0);
 }
+static int snapshot_read32(void *context, uint32_t address, uint32_t *value)
+{
+    struct mock *m = context;
+    CHECK(m->calls < 7u);
+    return read32(context,address,value);
+}
+static void invoke_snapshot(struct mock *m, struct mi4_dwc3_identity *out)
+{
+    uint32_t before[15];
+    unsigned i, completed=m->fail<7u ? m->fail : 7u;
+    enum mi4_dwc3_identify_status status=m->fail<7u ?
+        MI4_DWC3_IDENTIFY_READ_FAILED : MI4_DWC3_IDENTIFY_OK;
+    memcpy(before,m->values,sizeof(before));
+    memset(out,0xa5,sizeof(*out));
+    CHECK(mi4_dwc3_clock_snapshot(snapshot_read32,m,out)==status);
+    CHECK(out->status==status && m->calls==completed+(m->fail<7u));
+    CHECK(out->completed_reads==completed);
+    CHECK(out->failed_slot==(m->fail<7u ? m->fail : UINT32_MAX));
+    CHECK(out->valid_clocks==((1u<<(completed<5u ? completed : 5u))-1u));
+    CHECK(out->bcr_valid==(completed>5u) && out->root_valid==(completed>6u));
+    CHECK(out->bcr==(completed>5u ? m->values[5] : 0u));
+    CHECK(out->root_command==(completed>6u ? m->values[6] : 0u));
+    CHECK(out->valid_registers==0u);
+    for(i=0;i<5u;++i) CHECK(out->clock_values[i]==(i<completed ? m->values[i] : 0u));
+    for(i=0;i<8u;++i) CHECK(out->registers[i]==0u);
+    CHECK(memcmp(before,m->values,sizeof(before))==0);
+}
+static void snapshot_cases(void)
+{
+    struct mi4_dwc3_identity out;
+    struct mock m;
+    unsigned i,j,enabled;
+    checks=cases=0;
+    CHECK(mi4_dwc3_clock_snapshot(NULL,NULL,NULL)==MI4_DWC3_IDENTIFY_INVALID);
+    m=fresh();
+    CHECK(mi4_dwc3_clock_snapshot(snapshot_read32,&m,NULL)==MI4_DWC3_IDENTIFY_INVALID);
+    CHECK(m.calls==0u);
+    memset(&out,0xa5,sizeof(out));
+    CHECK(mi4_dwc3_clock_snapshot(NULL,NULL,&out)==MI4_DWC3_IDENTIFY_INVALID);
+    CHECK(out.status==MI4_DWC3_IDENTIFY_INVALID && out.completed_reads==0u);
+    CHECK(out.valid_clocks==0u && out.valid_registers==0u && out.failed_slot==UINT32_MAX);
+    CHECK(out.bcr_valid==0u && out.root_valid==0u && out.bcr==0u && out.root_command==0u);
+    for(i=0;i<5u;++i) CHECK(out.clock_values[i]==0u);
+    for(i=0;i<8u;++i) CHECK(out.registers[i]==0u);
+    /* Runtime first-branch HALT, asserted reset and blocked root are data only. */
+    m=fresh();m.values[0]=0x80000000u;m.values[5]=1u;m.values[6]=0x800000f3u;
+    invoke_snapshot(&m,&out);
+    for(i=0;i<5u;++i) for(j=0;j<16u;++j) for(enabled=0;enabled<2u;++enabled) {
+        m=fresh();m.values[i]=((uint32_t)j<<28)|enabled;
+        invoke_snapshot(&m,&out);
+    }
+    m=fresh();for(i=0;i<7u;++i)m.values[i]=0xffffffffu;
+    invoke_snapshot(&m,&out);
+    for(i=0;i<7u;++i) {
+        m=fresh();m.fail=i;
+        invoke_snapshot(&m,&out); /* Failed callback poisons its local output. */
+    }
+    printf("PASS snapshot: %u cases, %u assertions; seven GCC reads only, not identification\n",cases,checks);
+}
+static const uint32_t root_addresses[13] = {
+    0xfc400108u,0xfc4003c8u,0xfc4003d0u,0xfc4003ccu,0xfc4004acu,
+    0xfc4003c0u,0xfc4003d4u,0xfc4003d8u,0xfc4003dcu,0xfc4003e0u,
+    0xfc4003e4u,0xfc40001cu,0xfc401480u
+};
+static int root_read32(void *context, uint32_t address, uint32_t *value)
+{
+    struct mock *m=context;
+    unsigned slot=m->calls++;
+    CHECK(slot<13u && address==root_addresses[slot]);
+    if(slot==m->fail) { *value=0xdeadbeefu;return -1; }
+    *value=m->values[slot];return 0;
+}
+static void invoke_root(struct mock *m, struct mi4_dwc3_root_snapshot *out)
+{
+    uint32_t before[15];
+    unsigned i, completed=m->fail<13u ? m->fail : 13u;
+    enum mi4_dwc3_identify_status expected=m->fail<13u ?
+        MI4_DWC3_IDENTIFY_READ_FAILED : MI4_DWC3_IDENTIFY_OK;
+    memcpy(before,m->values,sizeof(before));memset(out,0xa5,sizeof(*out));
+    CHECK(mi4_dwc3_root_snapshot(root_read32,m,out)==expected);
+    CHECK(out->clocks.status==expected && m->calls==completed+(m->fail<13u));
+    CHECK(out->clocks.completed_reads==completed);
+    CHECK(out->clocks.failed_slot==(m->fail<13u ? m->fail : UINT32_MAX));
+    CHECK(out->clocks.valid_clocks==((1u<<(completed<5u ? completed : 5u))-1u));
+    CHECK(out->clocks.bcr_valid==(completed>5u) && out->clocks.root_valid==(completed>6u));
+    CHECK(out->clocks.bcr==(completed>5u ? m->values[5] : 0u));
+    CHECK(out->clocks.root_command==(completed>6u ? m->values[6] : 0u));
+    CHECK(out->clocks.valid_registers==0u);
+    CHECK(out->valid_extra==(completed>7u ? (1u<<(completed-7u))-1u : 0u));
+    for(i=0;i<5u;++i) CHECK(out->clocks.clock_values[i]==(i<completed ? m->values[i] : 0u));
+    for(i=0;i<8u;++i) CHECK(out->clocks.registers[i]==0u);
+    for(i=0;i<6u;++i) CHECK(out->values[i]==(completed>i+7u ? m->values[i+7u] : 0u));
+    CHECK(memcmp(before,m->values,sizeof(before))==0);
+}
+static void root_cases(void)
+{
+    struct mi4_dwc3_root_snapshot out;
+    struct mock m;
+    unsigned i,j;
+    checks=cases=0;
+    CHECK(mi4_dwc3_root_snapshot(NULL,NULL,NULL)==MI4_DWC3_IDENTIFY_INVALID);
+    m=fresh();
+    CHECK(mi4_dwc3_root_snapshot(root_read32,&m,NULL)==MI4_DWC3_IDENTIFY_INVALID && m.calls==0u);
+    memset(&out,0xa5,sizeof(out));
+    CHECK(mi4_dwc3_root_snapshot(NULL,NULL,&out)==MI4_DWC3_IDENTIFY_INVALID);
+    CHECK(out.clocks.status==MI4_DWC3_IDENTIFY_INVALID && out.clocks.completed_reads==0u);
+    CHECK(out.clocks.failed_slot==UINT32_MAX && out.clocks.valid_clocks==0u);
+    CHECK(out.clocks.bcr==0u && out.clocks.root_command==0u);
+    CHECK(out.clocks.bcr_valid==0u && out.clocks.root_valid==0u);
+    CHECK(out.clocks.valid_registers==0u && out.valid_extra==0u);
+    for(i=0;i<5u;++i) CHECK(out.clocks.clock_values[i]==0u);
+    for(i=0;i<8u;++i) CHECK(out.clocks.registers[i]==0u);
+    for(i=0;i<6u;++i) CHECK(out.values[i]==0u);
+    m=fresh();m.values[0]=0x80000000u;m.values[1]=0x8000cff0u;m.values[6]=0u;
+    invoke_root(&m,&out);
+    for(i=0;i<13u;++i) {
+        m=fresh();m.fail=i;invoke_root(&m,&out);
+    }
+    /* All bit patterns are raw data: no enable/lock/ownership acceptance. */
+    for(i=0;i<13u;++i) for(j=0;j<3u;++j) {
+        m=fresh();m.values[i]=j==0u ? 0u : j==1u ? 0xffffffffu : 0x80020001u;
+        invoke_root(&m,&out);
+    }
+    printf("PASS root snapshot: %u cases, %u assertions; thirteen raw GCC reads, not identification\n",cases,checks);
+}
 int main(void)
 {
     struct mi4_dwc3_identity out;
@@ -120,6 +245,8 @@ int main(void)
     for(i=0;i<5u;++i) CHECK(out.clock_values[i]==m.values[i]);
     CHECK(out.root_command==m.values[6] && out.registers[0]==0x5533220au);
     printf("PASS: %u cases, %u assertions; read-only inspection core only\n",cases,checks);
+    snapshot_cases();
+    root_cases();
     return 0;
 }
 '''
@@ -206,7 +333,15 @@ def main():
         controls=[('clock-gate',clock_gate,'if (0)'),
                   ('old-bit31-only',clock_gate,'if ((value & UINT32_C(0x80000001)) != UINT32_C(1))'),
                   ('id-gate','if (i == 0 && (value & MI4_DWC3_ID_MASK) != MI4_DWC3_ID_MAGIC)','if (0)'),
-                  ('root-gate','if ((value & UINT32_C(0x800000f3)) != UINT32_C(2))','if (0)')]
+                  ('root-gate','if ((value & UINT32_C(0x800000f3)) != UINT32_C(2))','if (0)'),
+                  ('snapshot-first-disabled-stop','if (i < MI4_DWC3_CLOCK_COUNT) {',
+                   'if (value == UINT32_C(0x80000000)) return finish(out, MI4_DWC3_IDENTIFY_CLOCK_BLOCKED);\n'
+                   '        if (i < MI4_DWC3_CLOCK_COUNT) {'),
+                  ('snapshot-core-address','UINT32_C(0xfc4003d4)\n};',
+                   'UINT32_C(0xf920c120)\n};'),
+                  ('root-snapshot-core-address','UINT32_C(0xfc401480)\n};',
+                   'UINT32_C(0xf920c120)\n};'),
+                  ('root-snapshot-short-read','slot < 13u;', 'slot < 12u;')]
         for label,old,new in controls:
             if source.count(old)!=1:raise ValueError('mutation anchor changed: '+label)
             passed,detail=execute(cc,directory,snapshots[0],source.replace(old,new,1),label)

@@ -15,7 +15,7 @@ def value(key, number):
     return key+'=0x%08x' % number
 
 
-def console(values=VALUES, status=0, failed=0xffffffff, read_fault=False):
+def console(values=VALUES, status=0, failed=0xffffffff, read_fault=False, addresses=CAPTURE.ADDRESSES):
     lines = [CAPTURE.START]
     for key, number in [('dwc3_ro_guard_ram_address', 0x5000),
         ('dwc3_ro_guard_ram_result', 0), ('dwc3_ro_guard_cpsr_before', 0x13),
@@ -27,12 +27,12 @@ def console(values=VALUES, status=0, failed=0xffffffff, read_fault=False):
     lines += [CAPTURE.SELFTEST, value('dwc3_ro_watchdog_count_first', 50),
               value('dwc3_ro_watchdog_count_second', 70)]
     for i, number in enumerate(values, 1):
-        for field, item in [('index', i), ('address', CAPTURE.ADDRESSES[i-1]),
+        for field, item in [('index', i), ('address', addresses[i-1]),
                             ('result', 0), ('value', number)]:
             lines.append(value('dwc3_ro_read_'+field, item))
     count = len(values)
     if read_fault:
-        for field, item in [('index', count+1), ('address', CAPTURE.ADDRESSES[count]),
+        for field, item in [('index', count+1), ('address', addresses[count]),
                             ('result', 0xffffffff)]:
             lines.append(value('dwc3_ro_read_'+field, item))
     for field, number in [('status', status), ('completed_reads', count),
@@ -44,7 +44,121 @@ def console(values=VALUES, status=0, failed=0xffffffff, read_fault=False):
     return '\n'.join(lines)
 
 
+def clock_console(count=7, fault=False):
+    words = [0x80000000, 0x80000000, 0x10000001, 0, 0, 1, 0x80000000][:count]
+    text = console(words, 0 if count == 7 else 2,
+                   0xffffffff if count == 7 else count, fault)
+    text = text.replace(CAPTURE.START, CAPTURE.CLOCK_START).replace(CAPTURE.FINISH, CAPTURE.CLOCK_FINISH)
+    text += '\n'+value('dwc3_ro_bcr_valid', int(count >= 6))
+    text += '\n'+value('dwc3_ro_root_valid', int(count >= 7))
+    return text
+
+
+ROOT_VALUES = [0x80000000,0x8000cff0,0x80000000,0x80000000,0x80000000,
+               0,0,0x2101,5,0xec,0xe7,0x20000,1]
+
+
+def root_console(count=13, fault=False, words=ROOT_VALUES):
+    text = console(words[:count],0 if count == 13 else 2,
+        0xffffffff if count == 13 else count,fault,CAPTURE.ROOT_ADDRESSES)
+    text = text.replace(CAPTURE.START,CAPTURE.ROOT_START).replace(CAPTURE.FINISH,CAPTURE.ROOT_FINISH)
+    text = text.replace(value('dwc3_ro_valid_registers',(1 << max(0,count-7))-1),
+                        value('dwc3_ro_valid_registers',0))
+    for key,number in [('bcr_valid',int(count>=6)),('root_valid',int(count>=7)),
+                       ('root_extra_valid',(1 << max(0,count-7))-1)]:
+        text += '\n'+value('dwc3_ro_'+key,number)
+    return text
+
+
 class CaptureTests(unittest.TestCase):
+    def test_root_snapshot_profile_and_limits(self):
+        report=CAPTURE.analyze(root_console(),root_snapshot=True)
+        self.assertEqual(report['completed_reads'],13)
+        self.assertFalse(report['identification_passed'])
+        profile=report['root_profile']
+        self.assertTrue(profile['matches_vendor_125mhz_configuration'])
+        self.assertTrue(profile['gpll0_active_bit17'])
+        for key in ('clock_write_authorized','measured_frequency','ownership_or_supplies_proved'):
+            self.assertFalse(profile[key])
+        self.assertFalse(profile['force_bit_sampled'])
+        for n,d in [(0xffec,0xffe7),(0xffffffec,0xffffffe7)]:
+            words=list(ROOT_VALUES);words[9:11]=[n,d]
+            self.assertTrue(CAPTURE.analyze(root_console(words=words),root_snapshot=True)
+                            ['root_profile']['matches_vendor_125mhz_configuration'])
+        for index,number in [(7,0x101),(8,0x10005),(9,0xed),(10,0xe8)]:
+            words=list(ROOT_VALUES);words[index]=number
+            self.assertFalse(CAPTURE.analyze(root_console(words=words),root_snapshot=True)
+                             ['root_profile']['matches_vendor_125mhz_configuration'])
+        words=list(ROOT_VALUES);words[11]=0x10000;words[12]=0
+        profile=CAPTURE.analyze(root_console(words=words),root_snapshot=True)['root_profile']
+        self.assertFalse(profile['gpll0_active_bit17'])
+        self.assertFalse(profile['apps_vote_bit0'])
+        for kwargs in ({}, {'clock_snapshot':True}, {'root_snapshot':True,'clock_snapshot':True},
+                       {'root_snapshot':True,'recovery_only':True}):
+            with self.assertRaises(ValueError):CAPTURE.analyze(root_console(),**kwargs)
+        for old,new in [('root_extra_valid=0x0000003f','root_extra_valid=0x0000001f'),
+            ('read_address=0xfc40001c','read_address=0xf920c120'),
+            ('read_address=0xfc401480','read_address=0xfc40001c')]:
+            with self.assertRaises(ValueError):
+                CAPTURE.analyze(root_console().replace(old,new),root_snapshot=True)
+
+    def test_root_snapshot_prefix_failures(self):
+        for count in range(13):
+            for fault in (False,True):
+                with self.subTest(count=count,fault=fault):
+                    report=CAPTURE.analyze(root_console(count,fault),root_snapshot=True)
+                    self.assertFalse(report['snapshot_complete'])
+                    self.assertFalse(report['identification_passed'])
+                    self.assertEqual(report['failed_slot'],count)
+                    self.assertEqual(len(report['samples']),count)
+
+    def test_clock_snapshot_raw_states_and_scope(self):
+        text = clock_console()
+        report = CAPTURE.analyze(text, clock_snapshot=True)
+        self.assertEqual(report['scope'], 'read-only-clock-snapshot')
+        self.assertTrue(report['snapshot_complete'])
+        self.assertFalse(report['identification_passed'])
+        self.assertEqual(len(report['samples']), 7)
+        self.assertEqual(report['samples']['0xfc400108'], '0x80000000')
+        with self.assertRaises(ValueError):
+            CAPTURE.analyze(text)
+        with self.assertRaises(ValueError):
+            CAPTURE.analyze(console(), clock_snapshot=True)
+        with self.assertRaises(ValueError):
+            CAPTURE.analyze(text, recovery_only=True, clock_snapshot=True)
+        for old, new in [
+            ('read_address=0xfc4003c8', 'read_address=0xf920c120'),
+            ('read_address=0xfc4003c8', 'read_address=0xfc400108'),
+            ('valid_clocks=0x0000001f', 'valid_clocks=0x0000000f'),
+            ('valid_registers=0x00000000', 'valid_registers=0x00000001'),
+            ('bcr_valid=0x00000001', 'bcr_valid=0x00000000'),
+            ('root_valid=0x00000001', 'root_valid=0x00000000'),
+            ('completed_reads=0x00000007', 'completed_reads=0x00000006'),
+            ('status=0x00000000', 'status=0x00000003'),
+            ('failed_slot=0xffffffff', 'failed_slot=0x00000000')]:
+            with self.subTest(mutation=old):
+                self.assertIn(old,text)
+                with self.assertRaises(ValueError):
+                    CAPTURE.analyze(text.replace(old,new,1), clock_snapshot=True)
+        for extra in ('\n'+CAPTURE.START, '\n'+CAPTURE.CLOCK_START,
+                      '\n'+CAPTURE.FINISH, '\n'+value('dwc3_ro_root_valid',1),
+                      '\n'+value('dwc3_ro_read_index',8)):
+            with self.assertRaises(ValueError):
+                CAPTURE.analyze(text+extra, clock_snapshot=True)
+
+    def test_clock_snapshot_prefix_failures(self):
+        for count in range(7):
+            for fault in (False,True):
+                with self.subTest(count=count, fault=fault):
+                    report = CAPTURE.analyze(clock_console(count,fault), clock_snapshot=True)
+                    self.assertFalse(report['snapshot_complete'])
+                    self.assertFalse(report['identification_passed'])
+                    self.assertEqual(report['failed_slot'],count)
+                    self.assertEqual(report['completed_reads'],count)
+        with self.assertRaises(ValueError):
+            CAPTURE.analyze(clock_console(3,True).replace('failed_slot=0x00000003',
+                'failed_slot=0x00000004'), clock_snapshot=True)
+
     def test_complete_identification(self):
         report = CAPTURE.analyze(console())
         self.assertTrue(report['identification_passed'])

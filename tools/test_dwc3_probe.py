@@ -46,6 +46,12 @@ const unsigned char stage90_guarded_read32_recovery[4] __attribute__((aligned(4)
 static struct stage90_guarded_read32_state ram_evidence, fault_evidence;
 static uint32_t saved_f;
 static int irq_case=-1;
+#if STAGE90_GUARDED_STORE_SELFTEST
+const unsigned char stage90_guarded_write32_fault[4] __attribute__((aligned(4)))={9,10,11,12};
+static int store_case=-1;
+static unsigned store_calls;
+static uint32_t store_restored;
+#endif
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr,"CHECK line %d: %s\n",__LINE__,#x); exit(1); } } while (0)
 static uint32_t l1[4096] __attribute__((aligned(16384)));
@@ -61,12 +67,24 @@ static struct { const char *key; uint32_t value; } logs[128];
 static uint32_t golden[] = {
     0u,0xdeadc000u,0xf9017008u,0xf901700cu,0xf901700cu,
     0xfc400108u,0xfc4003c8u,0xfc4003d0u,0xfc4003ccu,0xfc4004acu,
-    0xfc4003c0u,0xfc4003d4u,0xf920c120u,0xf920c110u,0xf920c140u,
+    0xfc4003c0u,0xfc4003d4u,
+#if STAGE90_DWC3_ROOT_SNAPSHOT
+    0xfc4003d8u,0xfc4003dcu,0xfc4003e0u,0xfc4003e4u,0xfc40001cu,0xfc401480u
+#else
+    0xf920c120u,0xf920c110u,0xf920c140u,
     0xf920c144u,0xf920c200u,0xf920c700u,0xf920c704u,0xf920c70cu
+#endif
 };
 static uint32_t values[15] = {1u,1u,1u,1u,1u,0u,2u,0x5533220au,
     0x12340008u,0x12340009u,0x1234000au,0x1234000bu,0x1234000cu,0x1234000du,0x1234000eu};
 static uint32_t seen[20];
+#if STAGE90_DWC3_ROOT_SNAPSHOT
+#define TARGET_COUNT 13u
+#elif STAGE90_DWC3_CLOCK_SNAPSHOT
+#define TARGET_COUNT 7u
+#else
+#define TARGET_COUNT 15u
+#endif
 #include "actual-probe.c"
 uint32_t *mmu_l1_table(void) { ++effects.mmu; return null_table ? NULL : l1; }
 const struct stage90_hw_watchdog_result *stage90_hw_watchdog_result(void)
@@ -92,7 +110,17 @@ void xnu_log_kv32(const char *key, uint32_t value)
         "dwc3_ro_guard_cpsr_before","dwc3_ro_guard_cpsr_after","dwc3_ro_guard_fault_spsr",
         "dwc3_ro_guard_fault_count","dwc3_ro_guard_fault_active","dwc3_ro_guard_fault_status",
         "dwc3_ro_guard_fault_output","dwc3_ro_guard_fault_expected_pc",
-        "dwc3_ro_guard_fault_cpsr_before","dwc3_ro_guard_fault_cpsr_after"};
+        "dwc3_ro_guard_fault_cpsr_before","dwc3_ro_guard_fault_cpsr_after",
+        "dwc3_ro_bcr_valid","dwc3_ro_root_valid","dwc3_ro_root_extra_valid",
+        "dwc3_store_ram_address","dwc3_store_ram_before_result","dwc3_store_ram_before_value",
+        "dwc3_store_ram_value","dwc3_store_ram_result","dwc3_store_ram_active","dwc3_store_ram_status",
+        "dwc3_store_ram_count","dwc3_store_ram_operation","dwc3_store_ram_cpsr_before",
+        "dwc3_store_ram_cpsr_after","dwc3_store_cpsr_restored","dwc3_store_ram_readback_result",
+        "dwc3_store_ram_readback_value","dwc3_store_fault_address","dwc3_store_fault_value",
+        "dwc3_store_fault_result","dwc3_store_fault_dfsr","dwc3_store_fault_dfar","dwc3_store_fault_pc",
+        "dwc3_store_fault_expected_pc","dwc3_store_fault_spsr","dwc3_store_fault_count",
+        "dwc3_store_fault_active","dwc3_store_fault_status","dwc3_store_fault_operation",
+        "dwc3_store_fault_cpsr_before","dwc3_store_fault_cpsr_after","dwc3_store_fault_cpsr_restored"};
     unsigned i;
     for(i=0;i<sizeof(keys)/sizeof(keys[0]);++i) if(!strcmp(key,keys[i])) break;
     CHECK(i<sizeof(keys)/sizeof(keys[0]) && effects.logs<128u);
@@ -116,7 +144,11 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
     if(i==0u) {
         unsigned j;
         CHECK(address!=0u && (address&3u)==0u);
+#if STAGE90_DWC3_ROOT_SNAPSHOT
+        for(j=1u;j<sizeof(golden)/sizeof(golden[0]);++j) CHECK(address!=golden[j]);
+#else
         for(j=1u;j<20u;++j) CHECK(address!=golden[j]);
+#endif
         CHECK(effects.logs>0u && !strcmp(logs[effects.logs-1u].key,"dwc3_ro_guard_ram_address"));
         CHECK(logs[effects.logs-1u].value==address && *out==0xa55a12edu);
         golden[0]=address;
@@ -136,7 +168,22 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
         *out=guard_case==2 ? 0x47524451u : 0x47524450u;
         return 0;
     }
+#if STAGE90_GUARDED_STORE_SELFTEST
+    if(i>=2u) {
+        CHECK(i<4u && address==(uint32_t)(uintptr_t)&dwc3_probe_store_word && *out==0u);
+        stage90_guarded_read32_state=(struct stage90_guarded_read32_state){0};
+        if((i==2u && store_case==0) || (i==3u && store_case==3)) return -7;
+        *out=dwc3_probe_store_word;
+        if((i==2u && store_case==1) || (i==3u && store_case==4)) *out^=1u;
+        return 0;
+    }
+#endif
     CHECK(address==golden[i]);
+#if STAGE90_DWC3_ROOT_SNAPSHOT
+    if(i>=5u) CHECK(i<18u && address>=0xfc400000u && address<0xfc402000u);
+#elif STAGE90_DWC3_CLOCK_SNAPSHOT
+    if(i>=5u) CHECK(i<12u && address>=0xfc400000u && address<0xfc401000u);
+#endif
     if(i==1u) {
         struct stage90_guarded_read32_state state={0};
         CHECK(*out==0xa55a12edu);
@@ -176,6 +223,51 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
     *out=i==2u ? en : i==3u ? first : i==4u ? second : values[i-5u];
     return 0;
 }
+#if STAGE90_GUARDED_STORE_SELFTEST
+uint32_t stage90_guarded_read32_cpsr_read(void) { return store_restored; }
+int stage90_guarded_write32(uint32_t address, uint32_t value)
+{
+    struct stage90_guarded_read32_state state={0};
+    unsigned call=store_calls++;
+    CHECK(call<2u);
+    CHECK(address==(call==0u ? (uint32_t)(uintptr_t)&dwc3_probe_store_word : 0xdeadc000u));
+    CHECK(value==(call==0u ? 0x53545231u : 0xfeed1234u));
+    state.expected_address=address;state.operation=1u;
+    state.cpsr_before_mask=0x13u|saved_f;state.cpsr_after_mask=state.cpsr_before_mask|0x80u;
+    store_restored=state.cpsr_before_mask;
+    if(call==0u) {
+        CHECK(effects.reads==3u && dwc3_probe_store_word==0xa55a12edu);
+        state.status=STAGE90_GUARDED_OK;
+        if(store_case==2) state.status=STAGE90_GUARDED_WRITE_FAULT;
+        else dwc3_probe_store_word=value;
+        if(store_case==5) state.active=1u;
+        if(store_case==6) state.status=STAGE90_GUARDED_FAULT;
+        if(store_case==7) state.operation=0u;
+        if(store_case==8) state.fault_count=1u;
+        if(store_case==9) state.cpsr_after_mask^=0x80u;
+        if(store_case==10) state.cpsr_before_mask^=0x40u;
+        if(store_case==11) store_restored^=0x80u;
+        stage90_guarded_read32_state=state;
+        return store_case==2 ? STAGE90_GUARDED_WRITE_FAULT : 0;
+    }
+    CHECK(effects.reads==4u && dwc3_probe_store_word==0x53545231u);
+    state.status=STAGE90_GUARDED_WRITE_FAULT;state.fault_count=1u;
+    state.fault_dfsr=0x805u;state.fault_dfar=address;
+    state.observed_pc=state.fault_pc=(uint32_t)(uintptr_t)stage90_guarded_write32_fault;
+    state.observed_spsr=state.cpsr_after_mask;
+    switch(store_case) {
+    case 12:state.fault_dfsr=5u;break; case 13:state.fault_dfsr=0x807u;break;
+    case 14:state.fault_dfsr=0x2805u;break; case 15:state.fault_dfar^=4u;break;
+    case 16:state.observed_pc+=4u;break; case 17:state.observed_spsr^=0x80u;break;
+    case 18:state.fault_count=0u;break; case 19:state.fault_count=2u;break;
+    case 20:state.active=1u;break; case 21:state.status=STAGE90_GUARDED_OK;break;
+    case 22:state.operation=0u;break; case 23:state.cpsr_after_mask^=0x40u;break;
+    case 24:store_restored^=0x80u;break; case 25:state.expected_address^=4u;break;
+    }
+    stage90_guarded_read32_state=state;
+    return store_case==26 ? 0 : STAGE90_GUARDED_WRITE_FAULT;
+}
+#endif
 static void callback_checks(void)
 {
     struct dwc3_probe_context ctx={0u,0u};
@@ -184,24 +276,81 @@ static void callback_checks(void)
     unsigned i;
     direct=1;
     for(i=0;i<sizeof(bad)/sizeof(bad[0]);++i) CHECK(dwc3_probe_read(&ctx,bad[i],&value)!=0);
+#if STAGE90_DWC3_ROOT_SNAPSHOT
+    {
+        static const uint32_t core[]={0xf920c120u,0xf920c110u,0xf920c140u,0xf920c144u,
+            0xf920c200u,0xf920c700u,0xf920c704u,0xf920c70cu};
+        for(i=0;i<8u;++i) CHECK(dwc3_probe_read(&ctx,core[i],&value)!=0);
+        CHECK(dwc3_probe_read(&ctx,0xfc400020u,&value)!=0);
+    }
+#elif STAGE90_DWC3_CLOCK_SNAPSHOT
+    for(i=12u;i<20u;++i) CHECK(dwc3_probe_read(&ctx,golden[i],&value)!=0);
+    CHECK(dwc3_probe_read(&ctx,0xfc4003d8u,&value)!=0);
+#endif
     CHECK(dwc3_probe_read(NULL,golden[5],&value)!=0);
     CHECK(dwc3_probe_read(&ctx,golden[5],NULL)!=0);
-    ctx.attempted=15u; CHECK(dwc3_probe_read(&ctx,golden[5],&value)!=0);
+    ctx.attempted=TARGET_COUNT; CHECK(dwc3_probe_read(&ctx,golden[5],&value)!=0);
     ctx.attempted=0u; now=10001u; CHECK(dwc3_probe_read(&ctx,golden[5],&value)!=0);
     CHECK(effects.reads==0u && effects.logs==0u && ctx.attempted==0u && value==0x12345678u);
-    ctx.attempted=14u; now=10000u; value=0u;
+    ctx.attempted=TARGET_COUNT-1u; now=10000u; value=0u;
     CHECK(dwc3_probe_read(&ctx,golden[5],&value)==0);
-    CHECK(ctx.attempted==15u && value==1u && effects.reads==1u);
+    CHECK(ctx.attempted==TARGET_COUNT && value==1u && effects.reads==1u);
     CHECK(dwc3_probe_read(&ctx,golden[5],&value)!=0 && effects.reads==1u);
     ctx.attempted=0u; fail=1; value=0xabcdef01u;
     CHECK(dwc3_probe_read(&ctx,golden[5],&value)==-7 && value==0xabcdef01u);
     CHECK(ctx.attempted==1u && effects.reads==2u);
 }
+#if STAGE90_GUARDED_STORE_SELFTEST
+static void store_verify(unsigned expected_reads, unsigned expected_stores, const char *skip)
+{
+    struct effects saved;
+    struct stage90_guarded_read32_state before,after;
+    unsigned i,writes=store_calls;
+    CHECK(effects.reads==expected_reads && writes==expected_stores && effects.delays==0u);
+    CHECK(strstr(text,"DWC3 guarded RAM store selftest; no MMIO target writes")!=NULL);
+    CHECK((strstr(text,"dwc3_ro store selftest passed; RAM writes only; controller target reads inhibited")!=NULL)==(skip==NULL));
+    CHECK(strstr(text,"dwc3_ro finished;")==NULL && strstr(text,"DWC3 read-only")==NULL);
+    if(skip) CHECK(strstr(text,skip)!=NULL);
+    for(i=0;i<effects.logs;++i) {
+        CHECK(strncmp(logs[i].key,"dwc3_ro_read_",13)!=0);
+        CHECK(strncmp(logs[i].key,"dwc3_ro_watchdog_",17)!=0);
+        CHECK(strcmp(logs[i].key,"dwc3_ro_status")!=0);
+    }
+    if(expected_reads>2u) {
+        kv("dwc3_store_ram_address",(uint32_t)(uintptr_t)&dwc3_probe_store_word);
+        kv("dwc3_store_ram_before_result",store_case==0 ? (uint32_t)-7 : 0u);
+    }
+    if(writes>0u) {
+        kv("dwc3_store_ram_value",0x53545231u);
+        kv("dwc3_store_ram_result",store_case==2 ? STAGE90_GUARDED_WRITE_FAULT : 0u);
+    }
+    if(!skip) {
+        kv("dwc3_store_ram_before_value",0xa55a12edu);
+        kv("dwc3_store_ram_readback_result",0u);kv("dwc3_store_ram_readback_value",0x53545231u);
+        kv("dwc3_store_ram_operation",1u);kv("dwc3_store_ram_status",STAGE90_GUARDED_OK);
+        kv("dwc3_store_ram_active",0u);kv("dwc3_store_ram_count",0u);
+        kv("dwc3_store_cpsr_restored",0x13u|saved_f);
+        kv("dwc3_store_fault_address",0xdeadc000u);kv("dwc3_store_fault_value",0xfeed1234u);
+        kv("dwc3_store_fault_result",STAGE90_GUARDED_WRITE_FAULT);
+        kv("dwc3_store_fault_dfsr",0x805u);kv("dwc3_store_fault_dfar",0xdeadc000u);
+        kv("dwc3_store_fault_pc",(uint32_t)(uintptr_t)stage90_guarded_write32_fault);
+        kv("dwc3_store_fault_expected_pc",(uint32_t)(uintptr_t)stage90_guarded_write32_fault);
+        kv("dwc3_store_fault_spsr",0x93u|saved_f);
+        kv("dwc3_store_fault_status",STAGE90_GUARDED_WRITE_FAULT);kv("dwc3_store_fault_count",1u);
+        kv("dwc3_store_fault_active",0u);kv("dwc3_store_fault_operation",1u);
+        kv("dwc3_store_fault_cpsr_restored",0x13u|saved_f);
+    }
+    saved=effects;before=stage90_guarded_read32_state;
+    stage90_dwc3_readonly_probe();after=stage90_guarded_read32_state;
+    CHECK(!memcmp(&saved,&effects,sizeof(saved)) && !memcmp(&before,&after,sizeof(after)) && writes==store_calls);
+}
+#endif
 int main(int argc, char **argv)
 {
     const char *name;
-    unsigned p, expected=20u, completed=15u, slot=UINT32_MAX, status=MI4_DWC3_IDENTIFY_OK;
-    unsigned clocks=31u, regs=255u, summary=1u, delays=1u, i, read_logs=0u, value_logs=0u;
+    unsigned p, expected=TARGET_COUNT+5u, completed=TARGET_COUNT, slot=UINT32_MAX, status=MI4_DWC3_IDENTIFY_OK;
+    unsigned clocks=31u, regs=STAGE90_DWC3_CLOCK_SNAPSHOT ? 0u : 255u;
+    unsigned summary=1u, delays=1u, i, read_logs=0u, value_logs=0u;
     const char *skip=NULL;
     struct effects saved;
     struct stage90_guarded_read32_state saved_state, after;
@@ -212,6 +361,19 @@ int main(int argc, char **argv)
     l1[0xfc4]=0xfc400000u|STAGE90_PMAP_DESC_SECTION_SO;
     wd.enabled=wd.counter_running=wd.countdown_plausible=wd.readback_ok=1u; wd.bark_ticks=100000u;
     if(!strcmp(name,"callback")) { callback_checks(); printf("PASS %u\n",checks); return 0; }
+#if STAGE90_GUARDED_STORE_SELFTEST
+    wd.countdown_first=100u;wd.countdown_second=110u;
+    if(!strcmp(name,"store")) {
+        CHECK(p<27u);store_case=(int)p;
+        skip=p<12u ? "guard STORE RAM selftest failed" : "guard STORE translation-fault selftest failed";
+    } else if(!strcmp(name,"store-headroom")) {
+        CHECK(p<3u);
+        if(p==0u) wd.countdown_second=wd.countdown_first;
+        else if(p==1u) wd.countdown_second=wd.bark_ticks;
+        else wd.bark_ticks=wd.countdown_second+65529u;
+        skip="recovery net not confirmed";
+    } else
+#endif
     if(!strcmp(name,"fiq")) {
         CHECK(p<2u); saved_f=p ? 0x40u : 0u; fake_cpsr|=saved_f;
     } else if(!strcmp(name,"irq-state")) {
@@ -242,10 +404,11 @@ int main(int argc, char **argv)
         else if(p<3u || p>=16u) { expected=1u;skip="guard RAM selftest failed"; }
         else { expected=2u;skip="guard translation-fault selftest failed"; }
     } else if(!strcmp(name,"fault")) {
-        CHECK(p<18u); fail=(int)p+2; expected=p+3u;
+        CHECK(p<TARGET_COUNT+3u); fail=(int)p+2; expected=p+3u;
         if(p<3u) { summary=0u; delays=p==2u; } else {
             slot=p-3u; completed=slot; status=MI4_DWC3_IDENTIFY_READ_FAILED;
-            clocks=(1u<<(slot<5u ? slot : 5u))-1u; regs=slot>7u ? (1u<<(slot-7u))-1u : 0u;
+            clocks=(1u<<(slot<5u ? slot : 5u))-1u;
+            regs=!STAGE90_DWC3_CLOCK_SNAPSHOT && slot>7u ? (1u<<(slot-7u))-1u : 0u;
         }
     } else if(!strcmp(name,"en-off")) { en=0u; expected=3u; summary=delays=0u; }
     else if(!strcmp(name,"counter")) {
@@ -260,17 +423,33 @@ int main(int argc, char **argv)
         if(!strcmp(name,"clock")) { CHECK(p<5u);index=p;value=0x10000001u; }
         else { CHECK(p<32u);value=(p/2u<<28)|(p%2u); }
         values[index]=value;
-        if(!(value&1u) || ((value>>28)!=0u && (value>>28)!=2u)) {
+        if(!STAGE90_DWC3_CLOCK_SNAPSHOT &&
+           (!(value&1u) || ((value>>28)!=0u && (value>>28)!=2u))) {
             completed=index+1u;expected=completed+5u;clocks=(1u<<completed)-1u;regs=0u;
             status=MI4_DWC3_IDENTIFY_CLOCK_BLOCKED;
         }
     } else if(!strcmp(name,"reset")) {
-        values[5]=1u;completed=6u;expected=11u;regs=0u;status=MI4_DWC3_IDENTIFY_RESET_ASSERTED;
+        values[5]=1u;
+        if(!STAGE90_DWC3_CLOCK_SNAPSHOT) {
+            completed=6u;expected=11u;regs=0u;status=MI4_DWC3_IDENTIFY_RESET_ASSERTED;
+        }
     } else if(!strcmp(name,"root")) {
         static const uint32_t bad[]={0u,1u,3u,0x80000002u,0x12u,0x22u,0x42u,0x82u};
-        CHECK(p<8u);values[6]=bad[p];completed=7u;expected=12u;regs=0u;status=MI4_DWC3_IDENTIFY_ROOT_BLOCKED;
+        CHECK(p<8u);values[6]=bad[p];
+        if(!STAGE90_DWC3_CLOCK_SNAPSHOT) {
+            completed=7u;expected=12u;regs=0u;status=MI4_DWC3_IDENTIFY_ROOT_BLOCKED;
+        }
+    } else if(!strcmp(name,"snapshot-disabled")) {
+        CHECK(STAGE90_DWC3_CLOCK_SNAPSHOT);
+        values[0]=0x80000000u;values[5]=1u;values[6]=0x800000f3u;
+    } else if(!strcmp(name,"root-extra")) {
+        CHECK(STAGE90_DWC3_ROOT_SNAPSHOT && p<6u);values[p+7u]=0xffffffffu;
     } else if(!strcmp(name,"id")) {
         values[7]=0x55320000u;completed=8u;expected=13u;regs=1u;status=MI4_DWC3_IDENTIFY_WRONG_ID;
+    } else if(!strcmp(name,"snapshot-budget")) {
+        CHECK(STAGE90_DWC3_CLOCK_SNAPSHOT && p<TARGET_COUNT);
+        step=10000u/(p+1u)+1u;expected=5u+p;completed=p;slot=p;
+        clocks=(1u<<(p<5u ? p : 5u))-1u;regs=0u;status=MI4_DWC3_IDENTIFY_READ_FAILED;
     } else if(!strcmp(name,"deadline")) {
         step=10001u;expected=5u;completed=clocks=regs=0u;slot=0u;status=MI4_DWC3_IDENTIFY_READ_FAILED;
     } else CHECK(!strcmp(name,"golden"));
@@ -278,10 +457,33 @@ int main(int argc, char **argv)
 #if !STAGE90_DWC3_TARGET_READS
     if(!skip) { expected=2u;summary=delays=0u; }
 #endif
+#if STAGE90_GUARDED_STORE_SELFTEST
+    {
+        unsigned stores=0u,reads=expected;
+        if(!strcmp(name,"store")) {
+            reads=store_case<2 ? 3u : store_case==2 || (store_case>=5 && store_case<12) ? 3u : 4u;
+            stores=store_case<2 ? 0u : store_case<12 ? 1u : 2u;
+        } else if(!skip) { reads=4u;stores=2u; }
+        stage90_dwc3_readonly_probe();store_verify(reads,stores,skip);
+        printf("PASS %u\n",checks);return 0;
+    }
+#endif
     stage90_dwc3_readonly_probe();
     CHECK(effects.reads==expected && effects.delays==delays);
     for(i=0;i<expected;++i) CHECK(seen[i]==golden[i]);
+#if STAGE90_DWC3_ROOT_SNAPSHOT
+    CHECK(strstr(text,"DWC3 read-only GCC root snapshot; no DWC3 core reads")!=NULL);
+    CHECK(strstr(text,"DWC3 read-only identity probe;")==NULL);
+    CHECK((strstr(text,"dwc3_ro finished; GCC root snapshot only; no DWC3 core reads")!=NULL)==summary);
+    CHECK(strstr(text,"GCC clock snapshot")==NULL && strstr(text,"identification is not a USB link")==NULL);
+#elif STAGE90_DWC3_CLOCK_SNAPSHOT
+    CHECK(strstr(text,"DWC3 read-only GCC clock snapshot; no DWC3 core reads")!=NULL);
+    CHECK(strstr(text,"DWC3 read-only identity probe;")==NULL);
+    CHECK((strstr(text,"dwc3_ro finished; GCC clock snapshot only; no DWC3 core reads")!=NULL)==summary);
+    CHECK(strstr(text,"identification is not a USB link")==NULL);
+#else
     CHECK(strstr(text,"DWC3 read-only identity probe;")!=NULL);
+#endif
     if(skip) CHECK(strstr(text,skip)!=NULL);
     CHECK((strstr(text,"dwc3_ro finished;")!=NULL)==summary);
     CHECK((strstr(text,"guard selftest passed:")!=NULL)==(!skip && expected>=2u));
@@ -310,7 +512,7 @@ int main(int argc, char **argv)
     for(i=0;i<effects.logs;++i) {
         if(!strcmp(logs[i].key,"dwc3_ro_read_index")) CHECK(logs[i].value==++read_logs);
         if(!strcmp(logs[i].key,"dwc3_ro_read_address")) {
-            CHECK(read_logs>0u && read_logs<=15u && logs[i].value==golden[read_logs+4u]);
+            CHECK(read_logs>0u && read_logs<=TARGET_COUNT && logs[i].value==golden[read_logs+4u]);
         }
         if(!strcmp(logs[i].key,"dwc3_ro_read_value")) {
             CHECK(read_logs>0u && logs[i].value==values[read_logs-1u]); ++value_logs;
@@ -322,6 +524,13 @@ int main(int argc, char **argv)
     if(summary) {
         kv("dwc3_ro_status",status);kv("dwc3_ro_completed_reads",completed);
         kv("dwc3_ro_valid_clocks",clocks);kv("dwc3_ro_valid_registers",regs);kv("dwc3_ro_failed_slot",slot);
+#if STAGE90_DWC3_CLOCK_SNAPSHOT
+        kv("dwc3_ro_bcr_valid",completed>5u);kv("dwc3_ro_root_valid",completed>6u);
+        CHECK(regs==0u && completed<=TARGET_COUNT);
+#endif
+#if STAGE90_DWC3_ROOT_SNAPSHOT
+        kv("dwc3_ro_root_extra_valid",completed>7u ? (1u<<(completed-7u))-1u : 0u);
+#endif
         kv("dwc3_ro_watchdog_count_first",100u);kv("dwc3_ro_watchdog_count_second",110u);
     }
     saved=effects; saved_state=stage90_guarded_read32_state;
@@ -398,15 +607,24 @@ def main():
                               ('stage90_guarded_profile.h', snapshots[5].decode()), ('harness.c', HARNESS),
                               ('dwc3_identify.c', snapshots[1].decode()), ('dwc3_identify.h', snapshots[2].decode())]:
             (directory/name).write_text(content)
-        def build(label, probe, enabled=1, target=1, irq=0):
+        def build(label, probe, enabled=1, target=1, irq=0, snapshot=0, root_snapshot=0,
+                  store32=0, store_selftest=0, compile_error=None):
             (directory/'actual-probe.c').write_text(probe)
             binary = directory/label
             flags = ['-std=c11', '-O0', '-Wall', '-Wextra', '-Werror', '-pedantic',
                      '-DSTAGE90_DWC3_READONLY='+str(enabled),
                      '-DSTAGE90_DWC3_TARGET_READS='+str(target),
+                     '-DSTAGE90_DWC3_CLOCK_SNAPSHOT='+str(snapshot),
+                     '-DSTAGE90_DWC3_ROOT_SNAPSHOT='+str(root_snapshot),
+                     '-DSTAGE90_GUARDED_STORE32='+str(store32),
+                     '-DSTAGE90_GUARDED_STORE_SELFTEST='+str(store_selftest),
                      '-DSTAGE90_GUARDED_IRQ_ONLY='+str(irq), '-I', str(directory)]
             if args.sanitize: flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
             result = command(cc+flags+[str(directory/'harness.c'), str(directory/'dwc3_identify.c'), '-o', str(binary)])
+            if compile_error is not None:
+                if result.returncode == 0 or compile_error not in result.stderr:
+                    raise ValueError(label+' failed to reject invalid snapshot mode:\n'+result.stderr)
+                return None
             if result.returncode: raise ValueError(label+' compile failed:\n'+result.stderr)
             return binary
         def run(binary, case):
@@ -420,37 +638,97 @@ def main():
         recovery_cases = [('golden', 0)]+fiq_cases+irq_cases
         recovery_cases += [case for case in cases if case[0] in
                            ('cpu', 'precondition', 'mapping', 'watchdog', 'selftest')]
+        snapshot_cases = [case for case in cases if case[0]!='id' and
+                          (case[0]!='fault' or case[1]<10)]
+        snapshot_cases += [('snapshot-disabled',0)]+[('snapshot-budget',i) for i in range(7)]
+        root_cases = [case for case in cases if case[0] not in ('id','fault','clock-state')]
+        root_cases += [('fault',i) for i in range(16)]
+        root_cases += [('snapshot-disabled',0)]+[('snapshot-budget',i) for i in range(13)]
+        root_cases += [('root-extra',i) for i in range(6)]
         checks = total = 0
-        profiles = [('strict-target', 1, 0, cases+fiq_cases),
-                    ('irq-target', 1, 1, cases+fiq_cases+irq_cases),
-                    ('irq-recovery-only', 0, 1, recovery_cases)]
-        for label, target, irq, selections in profiles:
-            binary = build(label, source, target=target, irq=irq)
+        profiles = [('strict-target', 1, 0, 0, 0, cases+fiq_cases),
+                    ('irq-target', 1, 1, 0, 0, cases+fiq_cases+irq_cases),
+                    ('irq-recovery-only', 0, 1, 0, 0, recovery_cases),
+                    ('irq-clock-snapshot', 1, 1, 1, 0, snapshot_cases+fiq_cases+irq_cases),
+                    ('irq-root-snapshot', 1, 1, 1, 1, root_cases+fiq_cases+irq_cases)]
+        for label, target, irq, snapshot, root_snapshot, selections in profiles:
+            binary = build(label, source, target=target, irq=irq, snapshot=snapshot, root_snapshot=root_snapshot)
             assertions = sum(run(binary, case) for case in selections)
             checks += assertions; total += len(selections)
             print('PASS profile:',label,len(selections),'cases,',assertions,'C assertions')
         # OFF compiles the original, entirely untouched source (no CPU seam needed).
         checks += run(build('actual-off', snapshots[0].decode(), enabled=0, target=0), ('off', 0))
         print('PASS:', total+1, 'fresh-process profile/OFF cases,', checks, 'C assertions')
+        store_cases=recovery_cases+[('store',i) for i in range(27)]+[('store-headroom',i) for i in range(3)]
+        store_binary=build('irq-store-selftest',source,target=0,irq=1,store32=1,store_selftest=1)
+        store_assertions=sum(run(store_binary,case) for case in store_cases)
+        print('PASS profile: irq-store-selftest',len(store_cases),'cases,',store_assertions,'C assertions')
         gate = ('if (!watchdog || !watchdog->enabled || !watchdog->counter_running ||\n'
                 '        !watchdog->countdown_plausible || !watchdog->readback_ok ||\n'
                 '        watchdog->bite_truncated || !stage90_deadman_armed())')
         spsr_check = ('((stage90_guarded_read32_state.observed_spsr ^\n'
                       '             stage90_guarded_read32_state.cpsr_after_mask) & STAGE90_GUARD_STABLE_CPSR)')
-        controls = [('watchdog-gate', gate, 'if (!watchdog)', ('watchdog',1), 1, 0),
+        controls = [('watchdog-gate', gate, 'if (!watchdog)', ('watchdog',1), 1, 0, 0),
                     ('address-whitelist', '!dwc3_probe_address_allowed(address)',
-                     '(0 && !dwc3_probe_address_allowed(address))', ('callback',0), 1, 0),
-                    ('one-shot', 'if (attempted) return;', 'if (attempted > 1u) return;', ('golden',0), 1, 0),
+                     '(0 && !dwc3_probe_address_allowed(address))', ('callback',0), 1, 0, 0),
+                    ('one-shot', 'if (attempted) return;', 'if (attempted > 1u) return;', ('golden',0), 1, 0, 0),
                     ('guard-selftest', 'if (!dwc3_probe_guard_selftest(table)) return;',
-                     '(void)dwc3_probe_guard_selftest(table);', ('selftest',5), 1, 0),
-                    ('saved-spsr', spsr_check, '0u', ('irq-state',1), 1, 1),
-                    ('target-inhibit', '#if !STAGE90_DWC3_TARGET_READS', '#if 0', ('golden',0), 0, 1)]
-        for label, old, new, case, target, irq in controls:
-            binary = build(label, replace_once(source,old,new), target=target, irq=irq)
+                     '(void)dwc3_probe_guard_selftest(table);', ('selftest',5), 1, 0, 0),
+                    ('saved-spsr', spsr_check, '0u', ('irq-state',1), 1, 1, 0),
+                    ('target-inhibit', '#if !STAGE90_DWC3_TARGET_READS', '#if 0', ('golden',0), 0, 1, 0),
+                    ('snapshot-core-whitelist', '#if !STAGE90_DWC3_CLOCK_SNAPSHOT', '#if 1',
+                     ('callback',0), 1, 1, 1),
+                    ('snapshot-target-cap', 'context->attempted >= 7u ||', 'context->attempted >= 15u ||',
+                     ('callback',0), 1, 1, 1),
+                    ('snapshot-identity-call', '(void)mi4_dwc3_clock_snapshot(dwc3_probe_read, &context, &identity);',
+                     '(void)mi4_dwc3_identify(dwc3_probe_read, &context, &identity);',
+                     ('snapshot-disabled',0), 1, 1, 1)]
+        for label, old, new, case, target, irq, snapshot in controls:
+            binary = build(label, replace_once(source,old,new), target=target, irq=irq, snapshot=snapshot)
             result = command([str(binary),case[0],str(case[1])])
             if result.returncode == 0 or 'CHECK line ' not in result.stderr:
                 raise ValueError('negative must fail a C assertion, not compile/crash: '+label+'\n'+result.stderr)
             print('PASS negative:',label,'rejected by actual C behavior')
+        for label, old, new, case in (
+                ('root-target-cap','context->attempted >= 13u ||','context->attempted >= 15u ||',('callback',0)),
+                ('root-core-whitelist','#if !STAGE90_DWC3_CLOCK_SNAPSHOT','#if 1',('callback',0))):
+            binary=build(label,replace_once(source,old,new),target=1,irq=1,snapshot=1,root_snapshot=1)
+            result=command([str(binary),case[0],str(case[1])])
+            if result.returncode==0 or 'CHECK line ' not in result.stderr:
+                raise ValueError('root negative must fail a C assertion: '+label+'\n'+result.stderr)
+            print('PASS negative:',label,'rejected by actual C behavior')
+        store_mutant=replace_once(source,'if (!dwc3_probe_store_selftest(table)) return;',
+                                  '(void)dwc3_probe_store_selftest(table);')
+        binary=build('store-selftest-bypass',store_mutant,target=0,irq=1,store32=1,store_selftest=1)
+        result=command([str(binary),'store','2'])
+        if result.returncode==0 or 'CHECK line ' not in result.stderr:
+            raise ValueError('store bypass negative must fail C assertion:\n'+result.stderr)
+        print('PASS negative: store-selftest-bypass rejected by actual C behavior')
+        marker='STAGE90_GUARDED_STORE_SELFTEST_requires_STORE32_IRQ_ONLY_READONLY_and_no_TARGET_READS'
+        for label,extra,expected_marker in (
+                ('store-selftest-not-bool',{'store_selftest':2},'STAGE90_GUARDED_STORE_SELFTEST_must_be_zero_or_one'),
+                ('store-selftest-needs-store',{'store32':0},marker),
+                ('store-selftest-forbids-target',{'target':1},marker),
+                ('store-selftest-needs-irq',{'irq':0},marker),
+                ('store-selftest-needs-readonly',{'enabled':0},marker)):
+            options=dict(target=0,irq=1,store32=1,store_selftest=1);options.update(extra)
+            build(label,source,compile_error=expected_marker,**options)
+            print('PASS invalid mode:',label,'rejected by explicit compile-time contract')
+        for label, root_snapshot, snapshot, target, enabled, marker in (
+                ('root-not-bool',2,1,1,1,'STAGE90_DWC3_ROOT_SNAPSHOT_must_be_zero_or_one'),
+                ('root-requires-clock',1,0,1,1,'STAGE90_DWC3_ROOT_SNAPSHOT_requires_CLOCK_SNAPSHOT_READONLY_and_TARGET_READS'),
+                ('root-requires-target',1,1,0,1,'STAGE90_DWC3_ROOT_SNAPSHOT_requires_CLOCK_SNAPSHOT_READONLY_and_TARGET_READS'),
+                ('root-requires-readonly',1,1,1,0,'STAGE90_DWC3_ROOT_SNAPSHOT_requires_CLOCK_SNAPSHOT_READONLY_and_TARGET_READS')):
+            build(label,source,target=target,enabled=enabled,irq=1,snapshot=snapshot,
+                  root_snapshot=root_snapshot,compile_error=marker)
+            print('PASS invalid mode:',label,'rejected by explicit compile-time contract')
+        for label, enabled, target, snapshot, marker in (
+                ('snapshot-not-bool',1,1,2,'STAGE90_DWC3_CLOCK_SNAPSHOT_must_be_zero_or_one'),
+                ('snapshot-requires-readonly',0,1,1,'STAGE90_DWC3_CLOCK_SNAPSHOT_requires_READONLY_and_TARGET_READS'),
+                ('snapshot-requires-target',1,0,1,'STAGE90_DWC3_CLOCK_SNAPSHOT_requires_READONLY_and_TARGET_READS')):
+            build(label, source, enabled=enabled, target=target, irq=1,
+                  snapshot=snapshot, compile_error=marker)
+            print('PASS invalid mode:',label,'rejected by explicit compile-time contract')
     for path, before in zip(files,snapshots):
         if path.read_bytes() != before: raise ValueError('source changed during test: '+str(path))
         print('SHA256',hashlib.sha256(before).hexdigest(),path.name)

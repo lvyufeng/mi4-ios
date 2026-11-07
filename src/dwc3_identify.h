@@ -59,4 +59,35 @@ struct mi4_dwc3_identity {
  */
 enum mi4_dwc3_identify_status mi4_dwc3_identify(
     mi4_dwc3_read32 reader, void *context, struct mi4_dwc3_identity *output);
+
+/* Independent GCC-only diagnostic, never calls mi4_dwc3_identify or reads DWC3.
+ * The adapter must independently establish that all seven GCC registers remain
+ * readable with USB branches disabled; this API does not establish power state.
+ * Reads the same five CBCRs, BCR, then root CMD once each, regardless of values.
+ * Stops on the first callback error, retaining only fully completed samples.
+ * Output initialization/validity and failed_slot follow the identity contract;
+ * registers and valid_registers always remain zero. Only INVALID, READ_FAILED
+ * and OK are returned. OK means a complete snapshot, NOT controller identity,
+ * enabled clocks, safe core access, a functioning USB link or speed proof.
+ */
+enum mi4_dwc3_identify_status mi4_dwc3_clock_snapshot(
+    mi4_dwc3_read32 reader, void *context, struct mi4_dwc3_identity *output);
+
+struct mi4_dwc3_root_snapshot {
+    struct mi4_dwc3_identity clocks;
+    uint32_t values[6]; /* CFG, M, N, D, GPLL0 status, APCS vote, in that order. */
+    uint32_t valid_extra;
+};
+/* Raw thirteen-GCC-register snapshot; no identity or clock-readiness inference.
+ * Reads the seven clock-snapshot addresses once, then CFG/M/N/D, GPLL0 status
+ * and APCS vote. The adapter independently owns mapping/readability/guarding.
+ * Fully initializes output; stops at the first callback error, preserving only
+ * complete samples. clocks.completed_reads counts ALL thirteen slots, and
+ * clocks.failed_slot is 0..12 (UINT32_MAX if none); slots 7..12 are values[].
+ * clocks.registers/valid_registers remain zero. valid_extra marks only completed
+ * extra reads. Returns INVALID, READ_FAILED, or OK (snapshot complete only).
+ * Raw PLL status is not a generic lock-bit contract; vote is not ownership.
+ */
+enum mi4_dwc3_identify_status mi4_dwc3_root_snapshot(
+    mi4_dwc3_read32 reader, void *context, struct mi4_dwc3_root_snapshot *output);
 #endif

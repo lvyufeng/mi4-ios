@@ -174,6 +174,43 @@ python3 tools/test_dwc3_trb.py --cc clang --sanitize
 python3 tools/test_dwc3_trb.py --cc gcc --sanitize
 ```
 
+## Root-clock snapshots and RAM-store prerequisite
+
+The seven-word GCC snapshot and distinct thirteen-word root snapshot have each
+completed one bounded RAM boot and recovered Android. Five USB branches were OFF;
+BCR/CMD were zero. The extra CFG/M/N/D were all zero, GPLL0 status was `0x00036005`
+and APPS vote `0x11`. This establishes missing master-root configuration, not
+frequency, voltage, ownership, DWC3 identity or USB transport. The thirteen-word
+mode adds exactly six unique GCC reads and never calls vendor clock functions.
+
+`STAGE90_GUARDED_STORE32` defaults OFF. When explicitly enabled with the IRQ-only
+profile, it shares the read guard's active/FIQ fail-stop state and adds a single
+aligned ARM STR with exact operation-specific fault/recovery labels. Accepted
+write faults return **8, indeterminate**: no retry, rollback or unchanged-target
+claim. Only eight nonexternal precise fault classes are accepted for writes;
+external classes remain unsupported even with raw WnR set. Read policy is unchanged.
+
+The separate `STAGE90_GUARDED_STORE_SELFTEST=1` profile requires target reads and
+both snapshots OFF. It first verifies the existing read/fault guard and cached
+watchdog headroom, then writes one exclusively owned ordinary-RAM word, reads it
+back, and attempts one store to a confirmed-unmapped section. No target MMIO write,
+controller read, word restoration or automatic retry is included. Native host,
+sanitizer and linked-byte checks are prerequisites, not real exception evidence.
+
+```sh
+python3 tools/test_guarded_store32.py --cc clang --sanitize
+python3 tools/test_dwc3_readonly_checker.py
+python3 tools/test_dwc3_store_capture.py
+# Private recovered console only; emits a sanitized RAM-only report:
+python3 tools/check_dwc3_store_capture.py /ABS/PRIVATE/recovered-console
+```
+
+The canonical full-build profile is
+`tools/build_profile_d13_guard_store_selftest.json` (five stages, 31 acceptance
+commands). A passing real RAM-store test is still not permission or proof for
+clock writes; root configuration, supplies, quiescence and the hardware adapter
+remain separate obligations. See the milestone record for actual build/boot state.
+
 ## Hardware boundary
 
 The EP0 planner commits **software** address/configuration after matching STATUS

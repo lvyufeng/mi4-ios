@@ -76,3 +76,84 @@ enum mi4_dwc3_identify_status mi4_dwc3_identify(
     }
     return finish(out, MI4_DWC3_IDENTIFY_OK);
 }
+
+static const uint32_t clock_snapshot_addresses[7] = {
+    UINT32_C(0xfc400108), UINT32_C(0xfc4003c8), UINT32_C(0xfc4003d0),
+    UINT32_C(0xfc4003cc), UINT32_C(0xfc4004ac), UINT32_C(0xfc4003c0),
+    UINT32_C(0xfc4003d4)
+};
+
+enum mi4_dwc3_identify_status mi4_dwc3_clock_snapshot(
+    mi4_dwc3_read32 reader, void *context, struct mi4_dwc3_identity *out)
+{
+    unsigned i;
+    uint32_t value;
+
+    if (out == NULL) return MI4_DWC3_IDENTIFY_INVALID;
+    *out = (struct mi4_dwc3_identity){0};
+    out->failed_slot = UINT32_MAX;
+    if (reader == NULL) return finish(out, MI4_DWC3_IDENTIFY_INVALID);
+    for (i = 0; i < 7u; ++i) {
+        value = 0;
+        if (reader(context, clock_snapshot_addresses[i], &value) != 0) {
+            out->failed_slot = i;
+            return finish(out, MI4_DWC3_IDENTIFY_READ_FAILED);
+        }
+        ++out->completed_reads;
+        if (i < MI4_DWC3_CLOCK_COUNT) {
+            out->clock_values[i] = value;
+            out->valid_clocks |= UINT32_C(1) << i;
+        } else if (i == 5u) {
+            out->bcr = value;
+            out->bcr_valid = 1;
+        } else {
+            out->root_command = value;
+            out->root_valid = 1;
+        }
+    }
+    return finish(out, MI4_DWC3_IDENTIFY_OK);
+}
+
+static const uint32_t root_snapshot_addresses[13] = {
+    UINT32_C(0xfc400108), UINT32_C(0xfc4003c8), UINT32_C(0xfc4003d0),
+    UINT32_C(0xfc4003cc), UINT32_C(0xfc4004ac), UINT32_C(0xfc4003c0),
+    UINT32_C(0xfc4003d4), UINT32_C(0xfc4003d8), UINT32_C(0xfc4003dc),
+    UINT32_C(0xfc4003e0), UINT32_C(0xfc4003e4), UINT32_C(0xfc40001c),
+    UINT32_C(0xfc401480)
+};
+
+enum mi4_dwc3_identify_status mi4_dwc3_root_snapshot(
+    mi4_dwc3_read32 reader, void *context, struct mi4_dwc3_root_snapshot *out)
+{
+    unsigned slot;
+    uint32_t value;
+    struct mi4_dwc3_identity *clocks;
+
+    if (out == NULL) return MI4_DWC3_IDENTIFY_INVALID;
+    *out = (struct mi4_dwc3_root_snapshot){0};
+    clocks = &out->clocks;
+    clocks->failed_slot = UINT32_MAX;
+    if (reader == NULL) return finish(clocks, MI4_DWC3_IDENTIFY_INVALID);
+    for (slot = 0; slot < 13u; ++slot) {
+        value = 0;
+        if (reader(context, root_snapshot_addresses[slot], &value) != 0) {
+            clocks->failed_slot = slot;
+            return finish(clocks, MI4_DWC3_IDENTIFY_READ_FAILED);
+        }
+        ++clocks->completed_reads;
+        if (slot < MI4_DWC3_CLOCK_COUNT) {
+            clocks->clock_values[slot] = value;
+            clocks->valid_clocks |= UINT32_C(1) << slot;
+        } else if (slot == 5u) {
+            clocks->bcr = value;
+            clocks->bcr_valid = 1;
+        } else if (slot == 6u) {
+            clocks->root_command = value;
+            clocks->root_valid = 1;
+        } else {
+            out->values[slot - 7u] = value;
+            out->valid_extra |= UINT32_C(1) << (slot - 7u);
+        }
+    }
+    return finish(clocks, MI4_DWC3_IDENTIFY_OK);
+}

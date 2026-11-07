@@ -19,6 +19,9 @@ enum stage90_guarded_read32_status {
     STAGE90_GUARDED_BUSY = 5,
     STAGE90_GUARDED_BAD_CONTEXT = 6,
     STAGE90_GUARDED_UNSUPPORTED_STATUS = 7
+#if STAGE90_GUARDED_STORE32
+    , STAGE90_GUARDED_WRITE_FAULT = 8 /* INDETERMINATE: target may have changed */
+#endif
 };
 
 enum stage90_guarded_abort_result {
@@ -42,7 +45,24 @@ struct stage90_guarded_read32_state {
     uint32_t breadcrumb;
     uint32_t cpsr_before_mask;
     uint32_t cpsr_after_mask;
+#if STAGE90_GUARDED_STORE32
+    uint32_t operation; /* read=0, write=1; same single-CPU active guard */
+#endif
 };
+#if STAGE90_GUARDED_STORE32
+_Static_assert(offsetof(struct stage90_guarded_read32_state, operation) == 52, "operation offset");
+_Static_assert(sizeof(struct stage90_guarded_read32_state) == 56, "store state size");
+_Static_assert(STAGE90_GUARDED_WRITE_FAULT == 8, "indeterminate write status");
+/* No out parameter. 0 only after STR, barriers and state checks; 8 means
+ * INDETERMINATE even for accepted precise faults. No retry/rollback allowed.
+ * Parent owns preflight, allowlist, watchdog and a separate future clock opt-in.
+ * Single CPU/thread; never use concurrently with guarded reads.
+ */
+int stage90_guarded_write32(uint32_t address, uint32_t value);
+extern const unsigned char stage90_guarded_write32_fault[];
+extern const unsigned char stage90_guarded_write32_recovery[];
+int stage90_guarded_write32_store_arm(uint32_t address, uint32_t value);
+#endif
 
 _Static_assert(offsetof(struct stage90_guarded_read32_state, active) == STAGE90_GUARD_ACTIVE_OFFSET, "FIQ active offset");
 _Static_assert(offsetof(struct stage90_guarded_read32_state, status) == STAGE90_GUARD_STATUS_OFFSET, "FIQ status offset");

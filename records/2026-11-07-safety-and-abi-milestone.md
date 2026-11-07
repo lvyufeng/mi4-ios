@@ -235,6 +235,39 @@ prerequisite blocker, not DWC3 identification, enumeration or transport. A separ
 GCC-only snapshot and dependency review must precede any clock enablement; the
 existing identification early-stop is not bypassed.
 
+### GCC-only clock and root evidence
+
+A separately compiled seven-address snapshot completed 29 acceptance commands and
+110 actual linked checks. One RAM boot read all seven words, passed exact guard
+recovery/live-watchdog checks, and recovered Android. Five USB branch status
+nibbles were OFF (`8`), including master raw `0x8000cff0`; BCR and root CMD were
+both zero. No DWC3 core access or clock write occurred. CMD zero samples ROOT_OFF
+clear with force bit1 also clear: requiring bit1=1 is not necessary for that sampled
+root-on status. The original strict identification predicate remains unchanged.
+
+Its image SHA256:
+`cd2bb930310a029e0691a771bbd193c854ba034e47e0348ce5205603949f83ab`.
+
+A distinct thirteen-address root snapshot added exactly CFG/M/N/D, GPLL0 status
+and APPS vote, without repeating CMD. It passed 29 commands and 112 linked checks;
+one RAM boot completed all thirteen reads and recovered Android. Raw CFG/M/N/D
+were all zero, so the expected supplier 125 MHz configuration was absent. GPLL0
+status was `0x00036005` (active bit17 set), APPS vote was `0x11`, and the original
+seven values were unchanged. Active is not a frequency/voltage measurement; a
+hardware vote is not consumer ownership or a software reference count. No vendor
+handoff function, security workaround, clock/PHY/controller write, or DWC3 core
+read was used. The thirteen sequential words are not an atomic snapshot.
+
+Its image SHA256:
+`4480ac00bb4f305af6017f36f2e6cb9879188aaa4bf55e6eee37a213328372fd`.
+
+The next prerequisite is a separate RAM-only guarded-store test: one owned RAM
+word with readback and one confirmed-unmapped STR fault. The primitive defaults
+OFF; write faults always mean indeterminate, never retry/rollback. Its write
+policy rejects external-abort classes pending a documented field guarantee,
+even when raw WnR is set. Host C/sanitizer/opcode tests do not establish real
+store recovery. No clock write is enabled by these snapshots or offline tests.
+
 ### Root-system provenance and capacity
 
 The current 512 KiB RAM root contains only launchd and dyld, with no dependency

@@ -81,8 +81,15 @@ def replace_anchor(source, old, new, label):
 
 
 def instrument_lifecycle(source, harness):
+    # The optional store wrapper has its own independent lifecycle tests. Never
+    # instrument its similarly named active stores as if they were read sites.
+    marker = 'int stage90_guarded_write32('
+    if source.count(marker) > 1:
+        raise ValueError('ambiguous optional store wrapper')
+    read_source, boundary, store_source = source.partition(marker)
     for index, (old, new) in enumerate(LIFECYCLE_ANCHORS, 1):
-        source = replace_anchor(source, old, new, 'lifecycle {}'.format(index))
+        read_source = replace_anchor(read_source, old, new, 'lifecycle {}'.format(index))
+    source = read_source + boundary + store_source
     # Verify all ten injection sites still exist exactly once across the actual
     # generated wrapper/policy and fake leaf. The latter owns only sites 3 and 5.
     for site in range(1, 11):

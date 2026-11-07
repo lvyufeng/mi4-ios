@@ -17,12 +17,24 @@ START = 'DWC3 read-only identity probe; no USB initialization'
 SELFTEST = 'dwc3_ro guard selftest passed: RAM and translation-fault recovery'
 FINISH = 'dwc3_ro finished; identification is not a USB link'
 RECOVERY = 'dwc3_ro recovery verified; controller target reads inhibited'
+CLOCK_START = 'DWC3 read-only GCC clock snapshot; no DWC3 core reads'
+CLOCK_FINISH = 'dwc3_ro finished; GCC clock snapshot only; no DWC3 core reads'
+ROOT_START = 'DWC3 read-only GCC root snapshot; no DWC3 core reads'
+ROOT_FINISH = 'dwc3_ro finished; GCC root snapshot only; no DWC3 core reads'
+ROOT_ADDRESSES = ADDRESSES[:7] + (0xfc4003d8, 0xfc4003dc, 0xfc4003e0,
+                                 0xfc4003e4, 0xfc40001c, 0xfc401480)
 
 
-def analyze(text, irq_only=False, recovery_only=False):
-    if text.count(START) != 1:
+def analyze(text, irq_only=False, recovery_only=False, clock_snapshot=False, root_snapshot=False):
+    if sum((recovery_only, clock_snapshot, root_snapshot)) > 1:
+        raise ValueError('probe modes are mutually exclusive')
+    snapshot = clock_snapshot or root_snapshot
+    start = ROOT_START if root_snapshot else CLOCK_START if clock_snapshot else START
+    if text.count(start) != 1 or any(marker in text for marker in
+                                    (START, CLOCK_START, ROOT_START) if marker != start):
         raise ValueError('expected exactly one probe start marker')
-    section = text.split(START, 1)[1]
+    section = text.split(start, 1)[1]
+    addresses = ROOT_ADDRESSES if root_snapshot else ADDRESSES[:7] if clock_snapshot else ADDRESSES
     records = []
     for line in section.splitlines():
         match = re.search(r'\b(dwc3_ro_[a-z_]+)=0x([0-9a-fA-F]{8})\b', line)
@@ -37,7 +49,7 @@ def analyze(text, irq_only=False, recovery_only=False):
 
     skipped = re.findall(r'dwc3_ro skipped: ([^\r\n]+)', section)
     if skipped:
-        if len(skipped) != 1 or FINISH in section or RECOVERY in section or any(k == 'dwc3_ro_read_index' for k, _ in records):
+        if len(skipped) != 1 or any(marker in section for marker in (FINISH, CLOCK_FINISH, ROOT_FINISH, RECOVERY)) or any(k == 'dwc3_ro_read_index' for k, _ in records):
             raise ValueError('contradictory skipped-probe evidence')
         # Avoid forwarding arbitrary private log text as a diagnostic.
         reasons = ('CPU/MMU/vector precondition', 'identity MMIO mapping mismatch',
@@ -48,14 +60,18 @@ def analyze(text, irq_only=False, recovery_only=False):
         reason = skipped[0]
         if reason not in reasons:
             raise ValueError('unknown probe skip reason')
-        report = {'scope': 'read-only-identification-only', 'result': 'skipped',
-                  'reason': reason, 'identification_passed': False}
+        report = {'scope': 'read-only-root-snapshot' if root_snapshot else 'read-only-clock-snapshot' if clock_snapshot else 'read-only-identification-only',
+                  'result': 'skipped', 'reason': reason, 'identification_passed': False}
+        if snapshot:
+            report['snapshot_complete'] = False
         if reason == 'guard RAM selftest failed' and any(k == 'dwc3_ro_guard_ram_result' for k, _ in records):
             report['guard_ram_result'] = one('dwc3_ro_guard_ram_result')
             report['cpsr_before_mask'] = hex(one('dwc3_ro_guard_cpsr_before'))
             report['cpsr_after_mask'] = hex(one('dwc3_ro_guard_cpsr_after'))
         return report
-    expected_end = RECOVERY if recovery_only else FINISH
+    expected_end = ROOT_FINISH if root_snapshot else CLOCK_FINISH if clock_snapshot else RECOVERY if recovery_only else FINISH
+    if any(marker in section for marker in (ROOT_FINISH, CLOCK_FINISH, RECOVERY, FINISH) if marker != expected_end):
+        raise ValueError('contradictory probe mode finish markers')
     if section.count(SELFTEST) != 1 or section.count(expected_end) != 1:
         raise ValueError('incomplete or duplicated probe execution')
     before = one('dwc3_ro_guard_cpsr_before')
@@ -106,7 +122,7 @@ def analyze(text, irq_only=False, recovery_only=False):
         if key == 'dwc3_ro_read_index':
             if cursor is not None and 'result' not in cursor:
                 raise ValueError('read result missing before next read')
-            if value != len(reads)+1 or value > len(ADDRESSES):
+            if value != len(reads)+1 or value > len(addresses):
                 raise ValueError('unexpected read index')
             cursor = {'index': value}
             reads.append(cursor)
@@ -114,7 +130,7 @@ def analyze(text, irq_only=False, recovery_only=False):
             field = key.rsplit('_', 1)[1]
             if cursor is None or field in cursor:
                 raise ValueError('orphan/duplicate read field')
-            if field == 'address' and value != ADDRESSES[cursor['index']-1]:
+            if field == 'address' and value != addresses[cursor['index']-1]:
                 raise ValueError('read address differs from exact ordered whitelist')
             if field != 'address' and 'address' not in cursor:
                 raise ValueError('read result precedes address')
@@ -132,6 +148,48 @@ def analyze(text, irq_only=False, recovery_only=False):
     status = one('dwc3_ro_status')
     if status not in range(7):
         raise ValueError('unknown identify status')
+    if snapshot:
+        if (one('dwc3_ro_valid_clocks') != (1 << min(completed,5))-1 or
+            one('dwc3_ro_valid_registers') != 0 or
+            one('dwc3_ro_bcr_valid') != int(completed >= 6) or
+            one('dwc3_ro_root_valid') != int(completed >= 7)):
+            raise ValueError('clock snapshot has inconsistent validity evidence')
+        if root_snapshot and one('dwc3_ro_root_extra_valid') != (1 << max(0,completed-7))-1:
+            raise ValueError('root snapshot has inconsistent extra validity evidence')
+        report = {'scope': 'read-only-root-snapshot' if root_snapshot else 'read-only-clock-snapshot', 'result': 'stopped',
+                  'snapshot_complete': False, 'identification_passed': False,
+                  'guard_selftest_passed': True, 'watchdog_advancing': True,
+                  'completed_reads': completed,
+                  'samples': {hex(r['address']):hex(r['value']) for r in reads if r['result'] == 0}}
+        if status == 0:
+            if completed != len(addresses) or len(reads) != len(addresses) or one('dwc3_ro_failed_slot') != 0xffffffff:
+                raise ValueError('clock/root snapshot success lacks exact read-count evidence')
+            report.update(result='snapshot-complete', snapshot_complete=True)
+            if root_snapshot:
+                values = [r['value'] for r in reads]
+                command, cfg, m, n, d, pll, vote = values[6:13]
+                normalize = lambda word: word | (0xffff0000 if word >> 8 else 0xffffff00)
+                consistent = ((cfg & 0x371f) == 0x2101 and m == 5 and
+                              normalize(n) == 0xffffffec and normalize(d) == 0xffffffe7)
+                report['root_profile'] = {
+                    'command_stable_known_fields': (command & 0xf1) == 0,
+                    'root_off': bool(command & 0x80000000),
+                    'force_bit_sampled': bool(command & 2),
+                    'matches_vendor_125mhz_configuration': consistent,
+                    'normalized_n': hex(normalize(n)), 'normalized_d': hex(normalize(d)),
+                    'gpll0_active_bit17': bool(pll & 0x20000),
+                    'apps_vote_bit0': bool(vote & 1),
+                    'measured_frequency': False, 'clock_write_authorized': False,
+                    'ownership_or_supplies_proved': False}
+        elif status == 2:
+            slot = one('dwc3_ro_failed_slot')
+            if slot != completed or completed >= len(addresses) or len(reads) not in (completed, completed+1):
+                raise ValueError('clock snapshot failure has inconsistent slot/count')
+            report.update(reason='guarded GCC read failed or pre-read budget expired',
+                          failed_slot=slot, next_address=hex(addresses[slot]))
+        else:
+            raise ValueError('clock snapshot returned an identification-only status')
+        return report
     report = {'scope': 'read-only-identification-only', 'result': 'stopped',
               'identify_status': status, 'completed_reads': completed,
               'guard_selftest_passed': True, 'watchdog_advancing': True,
@@ -187,10 +245,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('console', type=Path)
     parser.add_argument('--irq-only', action='store_true')
-    parser.add_argument('--recovery-only', action='store_true')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--recovery-only', action='store_true')
+    modes.add_argument('--clock-snapshot', action='store_true')
+    modes.add_argument('--root-snapshot', action='store_true')
     args = parser.parse_args()
     print(json.dumps(analyze(args.console.read_text(errors='replace'),
-                             args.irq_only, args.recovery_only), indent=2, sort_keys=True))
+                             args.irq_only, args.recovery_only, args.clock_snapshot,
+                             args.root_snapshot), indent=2, sort_keys=True))
 
 
 if __name__ == '__main__':

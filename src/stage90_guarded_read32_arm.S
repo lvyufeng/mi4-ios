@@ -1,4 +1,5 @@
-/* ARMv7-A ARM state only. No literal-pool loads, MMIO writes, or C init fixup.
+/* ARMv7-A ARM state only. No literal-pool loads or C init fixup.
+ * STORE32=1 adds one opt-in target STR; it does not authorize MMIO writes.
  * r0=address, r1=trusted RAM sample pointer. Leaf uses only volatile registers.
  * Existing vectors preserve r0-r3/r12/lr and SPSR_abt on exception return.
  */
@@ -90,4 +91,31 @@ stage90_guarded_read32_park:
 1:  wfe                    /* already-armed external watchdog may bite */
     b 1b                   /* deliberately no logger/control/MMIO writes */
 .size stage90_guarded_read32_park, . - stage90_guarded_read32_park
+#if STAGE90_GUARDED_STORE32
+/* r0=aligned target, r1=explicit value. No RMW, retries or rollback.
+ * Precise abort recovery does NOT imply the target was unchanged.
+ */
+.align 2
+.global stage90_guarded_write32_store_arm
+.type stage90_guarded_write32_store_arm, %function
+stage90_guarded_write32_store_arm:
+    dsb sy
+    isb sy
+.global stage90_guarded_write32_fault
+.type stage90_guarded_write32_fault, %function
+stage90_guarded_write32_fault:
+    str r1, [r0]            /* sole 32-bit target access */
+.size stage90_guarded_write32_fault, 4
+    dsb sy                 /* off-STR aborts MUST park */
+    isb sy
+    mov r0, #0
+    bx lr
+.global stage90_guarded_write32_recovery
+.type stage90_guarded_write32_recovery, %function
+stage90_guarded_write32_recovery:
+    mov r0, #8             /* WRITE_FAULT: INDETERMINATE, store-free recovery */
+    bx lr
+.size stage90_guarded_write32_recovery, . - stage90_guarded_write32_recovery
+.size stage90_guarded_write32_store_arm, . - stage90_guarded_write32_store_arm
+#endif
 .section .note.GNU-stack,"",%progbits
