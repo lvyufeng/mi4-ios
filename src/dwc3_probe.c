@@ -16,6 +16,18 @@
 #ifndef STAGE90_GUARDED_STORE_SELFTEST
 #define STAGE90_GUARDED_STORE_SELFTEST 0
 #endif
+#ifndef STAGE90_RPM_RBCPR_SNAPSHOT
+#define STAGE90_RPM_RBCPR_SNAPSHOT 0
+#endif
+#if STAGE90_RPM_RBCPR_SNAPSHOT != 0 && STAGE90_RPM_RBCPR_SNAPSHOT != 1
+#error STAGE90_RPM_RBCPR_SNAPSHOT_must_be_zero_or_one
+#endif
+#if STAGE90_RPM_RBCPR_SNAPSHOT && (STAGE90_DWC3_READONLY != 1 || STAGE90_DWC3_TARGET_READS != 1 || !defined(STAGE90_GUARDED_IRQ_ONLY) || STAGE90_GUARDED_IRQ_ONLY != 1 || STAGE90_GUARDED_STORE_SELFTEST != 0 || STAGE90_DWC3_CLOCK_SNAPSHOT != 0 || STAGE90_DWC3_ROOT_SNAPSHOT != 0)
+#error STAGE90_RPM_RBCPR_SNAPSHOT_requires_READONLY_IRQ_ONLY_TARGET_and_no_STORE_CLOCK_ROOT
+#endif
+#if STAGE90_RPM_RBCPR_SNAPSHOT && defined(STAGE90_GUARDED_STORE32) && STAGE90_GUARDED_STORE32 != 0
+#error STAGE90_RPM_RBCPR_SNAPSHOT_requires_STORE32_zero
+#endif
 #if STAGE90_GUARDED_STORE_SELFTEST != 0 && STAGE90_GUARDED_STORE_SELFTEST != 1
 #error STAGE90_GUARDED_STORE_SELFTEST_must_be_zero_or_one
 #endif
@@ -42,11 +54,16 @@
 #endif
 
 #if STAGE90_DWC3_READONLY
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+#include "rpm_rbcpr_snapshot.h"
+#else
 #include "dwc3_identify.h"
+#endif
 #include "stage90_guarded_read32.h"
 
 extern uint8_t stage90_vectors[];
 
+#if !STAGE90_RPM_RBCPR_SNAPSHOT
 /* This is an address whitelist, not an MMIO-completion guarantee. */
 static int dwc3_probe_address_allowed(uint32_t address)
 {
@@ -81,6 +98,7 @@ static int dwc3_probe_address_allowed(uint32_t address)
         return 0;
     }
 }
+#endif
 
 static int dwc3_probe_guard_selftest(uint32_t *table)
 {
@@ -237,6 +255,44 @@ static int dwc3_probe_store_selftest(uint32_t *table)
 }
 #endif
 
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+struct rpm_probe_context { unsigned attempted, phase, stopped; uint32_t block; uint64_t start; };
+static const uint32_t rpm_probe_offsets[10] = {
+    0u, 4u, 8u, 12u, 20u, 92u, 164u, 232u, 236u, 4u
+};
+
+static int rpm_probe_address_allowed(const struct rpm_probe_context *context, uint32_t address)
+{
+    if (context->phase == 0u || context->phase == 11u)
+        return address == UINT32_C(0xfc190010);
+    return context->phase <= 10u && context->block != 0u &&
+        address == context->block + rpm_probe_offsets[context->phase - 1u];
+}
+
+static int rpm_probe_read(void *opaque, uint32_t address, uint32_t *value)
+{
+    struct rpm_probe_context *context = opaque;
+    int result;
+    if (!value || !context || context->stopped || !rpm_probe_address_allowed(context, address) ||
+        context->attempted >= 24u ||
+        timebase_elapsed_us(context->start, timebase_ticks()) >= 10000u)
+        return -1;
+    ++context->attempted;
+    xnu_log_kv32("rpm_ro_read_index", context->attempted);
+    xnu_log_kv32("rpm_ro_read_address", address);
+    result = stage90_guarded_read32(address, value);
+    xnu_log_kv32("rpm_ro_read_result", (uint32_t)result);
+    if (!result) {
+        xnu_log_kv32("rpm_ro_read_value", *value);
+        if (address == UINT32_C(0xfc190010) && !context->block &&
+            *value >= UINT32_C(0x00190014) && *value <= UINT32_C(0x0019f7fc) &&
+            (*value & 3u) == 0u)
+            context->block = UINT32_C(0xfc000000) + *value;
+        context->phase = (context->phase + 1u) % 12u;
+    } else context->stopped = 1u;
+    return result;
+}
+#else
 struct dwc3_probe_context { unsigned attempted; uint64_t start; };
 
 static int dwc3_probe_read(void *opaque, uint32_t address, uint32_t *value)
@@ -261,15 +317,21 @@ static int dwc3_probe_read(void *opaque, uint32_t address, uint32_t *value)
     if (!result) xnu_log_kv32("dwc3_ro_read_value", *value);
     return result;
 }
+#endif
 
 void stage90_dwc3_readonly_probe(void)
 {
     const struct stage90_hw_watchdog_result *watchdog;
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+    struct mi4_rpm_rbcpr_snapshot rpm_snapshot;
+    struct rpm_probe_context context;
+#else
     struct mi4_dwc3_identity identity;
 #if STAGE90_DWC3_ROOT_SNAPSHOT
     struct mi4_dwc3_root_snapshot root_snapshot;
 #endif
     struct dwc3_probe_context context;
+#endif
     uint32_t cpsr, sctlr, vbar, ttbr0, ttbcr, dacr;
     uint32_t *table;
     uint32_t enable = 0, count_first = 0, count_second = 0;
@@ -277,7 +339,9 @@ void stage90_dwc3_readonly_probe(void)
 
     if (attempted) return;
     attempted = 1;
-#if STAGE90_GUARDED_STORE_SELFTEST
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+    xnu_log_puts("RPM RBCPR V2 read-only snapshot; no clock or supply writes\n");
+#elif STAGE90_GUARDED_STORE_SELFTEST
     xnu_log_puts("DWC3 guarded RAM store selftest; no MMIO target writes\n");
 #elif STAGE90_DWC3_ROOT_SNAPSHOT
     xnu_log_puts("DWC3 read-only GCC root snapshot; no DWC3 core reads\n");
@@ -308,6 +372,13 @@ void stage90_dwc3_readonly_probe(void)
         xnu_log_puts("dwc3_ro skipped: identity MMIO mapping mismatch\n");
         return;
     }
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+    if (table[UINT32_C(0xfc100000) >> 20] !=
+            (UINT32_C(0xfc100000) | STAGE90_PMAP_DESC_SECTION_SO)) {
+        xnu_log_puts("dwc3_ro skipped: RPM data mapping mismatch\n");
+        return;
+    }
+#endif
     watchdog = stage90_hw_watchdog_result();
     if (!watchdog || !watchdog->enabled || !watchdog->counter_running ||
         !watchdog->countdown_plausible || !watchdog->readback_ok ||
@@ -355,6 +426,19 @@ void stage90_dwc3_readonly_probe(void)
     }
     context.attempted = 0;
     context.start = timebase_ticks();
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+    context.phase = context.stopped = 0;
+    context.block = 0;
+    (void)mi4_rpm_rbcpr_snapshot(rpm_probe_read, &context, &rpm_snapshot);
+    xnu_log_kv32("rpm_ro_status", (uint32_t)rpm_snapshot.result);
+    xnu_log_kv32("rpm_ro_completed_reads", rpm_snapshot.successful_reads);
+    /* Core attempts include adapter preflight failures; read_index is actual loads only. */
+    xnu_log_kv32("rpm_ro_attempted_reads", rpm_snapshot.attempted_reads);
+    xnu_log_kv32("rpm_ro_failed_slot", rpm_snapshot.failed_slot);
+    xnu_log_kv32("rpm_ro_sample_zero_valid", rpm_snapshot.samples[0].valid_mask);
+    xnu_log_kv32("rpm_ro_sample_one_valid", rpm_snapshot.samples[1].valid_mask);
+    xnu_log_puts("rpm_ro finished; sampled telemetry only; no clock-write authorization\n");
+#else
 #if STAGE90_DWC3_ROOT_SNAPSHOT
     (void)mi4_dwc3_root_snapshot(dwc3_probe_read, &context, &root_snapshot);
     identity = root_snapshot.clocks;
@@ -382,6 +466,7 @@ void stage90_dwc3_readonly_probe(void)
     xnu_log_puts("dwc3_ro finished; GCC clock snapshot only; no DWC3 core reads\n");
 #else
     xnu_log_puts("dwc3_ro finished; identification is not a USB link\n");
+#endif
 #endif
 }
 #else

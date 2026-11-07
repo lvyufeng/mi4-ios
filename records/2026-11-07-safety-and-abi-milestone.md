@@ -294,6 +294,33 @@ PLL active, CPU operation, vote bits and leaf-OFF samples do not prove it. No
 PLL/RPM/PMIC/security write, clock commit, branch enable or DWC3 access follows
 automatically from the successful RAM test.
 
+### Read-only RPM telemetry outcome
+
+A separate STORE-disabled image completed five build stages, 33 acceptance
+commands and 131 actual linked checks. Both offset tables matched their exact
+40-byte contracts, the read-guard state was 52 bytes, and all guarded-write
+symbols were absent. The four rebuilt entry artifacts remained byte-identical.
+Image SHA256:
+
+`92d17f237ac92f54e2c6dfd9e00211cebc185f8cdffa97b3e70e6fefa35e9cde`.
+
+One bounded RAM boot completed all 24 guarded reads and recovered Android.
+The relative pointer was `0x0019d920`, resolving to `0xfc19d920`; num_rails was 2,
+status was `0x13`, and CX metadata was 3 corners / 3 recommendations. Both passes
+matched, but all three sampled programmed-voltage fields, the current-corner
+field and railway-voltage field were zero. No RPM vote, clock/PMIC write,
+security change or DWC3 core access occurred.
+
+This establishes readable, repeated V2-shaped data at that handoff, **not physical
+CX power-off or sufficient supply**. The rail name and OFF string come from
+consumer-side labels; the remote format has no rail ID, magic, version or validity
+contract. The supplier consumer also warns that RPM memory can contain invalid
+statistics when its producer has not initialized. This tree cannot determine
+why these particular remote fields are zero. Status is not a documented freshness
+or seqlock protocol. Do not switch to the different V1 ABI or add more statistics
+merely to obtain clock-write approval. Supply level remains UNKNOWN, and the
+five-write master-root candidate remains undeployed.
+
 ### Root-system provenance and capacity
 
 The current 512 KiB RAM root contains only launchd and dyld, with no dependency
@@ -301,6 +328,17 @@ libraries, shared cache or `/dev` mountpoint. The larger host-side root image is
 historical laboratory derivative containing injected observers and modified
 service configuration, not evidence of untouched stock iOS. Those jobs will not
 be copied wholesale or used as proof of genuine service behavior.
+
+A further metadata-only audit found local root/archive candidates, but their
+VERSION/BOOT-MAP identify the same finite-app-launch laboratory lineage, not an
+independent stock source. BOOT-MAP explicitly records a donor-cache UIKit guard
+with code/signature-range patches. The affected-library boundaries are not yet
+established, so the complete cache cannot be treated as untouched stock. No
+verified same-build standalone libbsm/libSystem set or runnable ARMv7 cache-deopt
+result was found in the limited material audit. Existing extractor API metadata
+is not evidence of successful reconstruction. The hash-verified laboratory root's
+SystemVersion metadata states iOS 7.1.2 / build 11D257; that text does not establish
+that its executable or cache bytes are authentic to that build.
 
 The launchd dependency closure includes 33 cached libraries. The complete cache
 is about 301 MiB and cannot be embedded in the actually owned 64 MiB window.

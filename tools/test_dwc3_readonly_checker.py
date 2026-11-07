@@ -37,6 +37,9 @@ STORE = (0xf57ff04f, 0xf57ff06f, 0xe5801000, 0xf57ff04f, 0xf57ff06f,
          0xe3a00000, 0xe12fff1e, 0xe3a00008, 0xe12fff1e)
 STORE_START = b'DWC3 guarded RAM store selftest; no MMIO target writes'
 STORE_FINISH = b'dwc3_ro store selftest passed; RAM writes only; controller target reads inhibited'
+RPM_OFFSETS = (0, 4, 8, 0xc, 0x14, 0x5c, 0xa4, 0xe8, 0xec, 4)
+RPM_START = b'RPM RBCPR V2 read-only snapshot; no clock or supply writes'
+RPM_FINISH = b'rpm_ro finished; sampled telemetry only; no clock-write authorization'
 MARKERS = (b'dwc3_ro guard selftest passed: RAM and translation-fault recovery',
            b'dwc3_ro skipped: guard translation-fault selftest failed',
            b'mmu legacy CI USB probe skipped; primary port is DWC3',
@@ -62,11 +65,11 @@ def branch(source, target, opcode):
 
 class Fixture:
     def __init__(self, irq_only=False, recovery_only=False, clock_snapshot=False,
-                 root_snapshot=False, store_selftest=False):
+                 root_snapshot=False, store_selftest=False, rpm_snapshot=False):
         self.irq_only, self.recovery_only = irq_only, recovery_only
         self.clock_snapshot, self.root_snapshot = clock_snapshot, root_snapshot
-        self.store_selftest = store_selftest
-        self.payload, self.entry = image(), image(0x100)
+        self.store_selftest, self.rpm_snapshot = store_selftest, rpm_snapshot
+        self.payload, self.entry = image(0x1900 if rpm_snapshot else 0x1800), image(0x100)
         self.config = ''.join('#define STAGE90_' + name + ' ' + value + '\n'
                               for name, value in (('DWC3_READONLY', '1'),
                               ('SKIP_USB_PREBOOT', '1'), ('CACHE_MODE', '0'),
@@ -212,6 +215,32 @@ class Fixture:
             self.payload = self.payload.replace(MARKERS[-1], b'X'*len(MARKERS[-1]))
             marker = STORE_START+b'\0'+STORE_FINISH+b'\0'
             self.payload[0x1600:0x1600+len(marker)] = marker
+        if rpm_snapshot:
+            self.config += '#define STAGE90_RPM_RBCPR_SNAPSHOT 1\n'
+            self.nm += ('00001c00 00000004 T mi4_rpm_rbcpr_snapshot\n'
+                        '00001f00 00000008 t rpm_probe_read\n'
+                        '00002800 00000028 r rpm_rbcpr_sample_offsets\n'
+                        '00002840 00000028 r rpm_probe_offsets\n')
+            self.dis = self.dis.replace('bl 1500 <mi4_dwc3_identify>',
+                'bl 1040 <stage90_guarded_read32>\n'
+                '  1408: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                '  140c: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                '  1410: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                '  1414: eb000000 bl 1c00 <mi4_rpm_rbcpr_snapshot>')
+            self.dis += ('00001c00 <mi4_rpm_rbcpr_snapshot>:\n'
+                         '  1c00: e12fff1e bx lr\n'
+                         '00001f00 <rpm_probe_read>:\n'
+                         '  1f00: eb000000 bl 1040 <stage90_guarded_read32>\n'
+                         '  1f04: e12fff1e bx lr\n')
+            self.word(0x1c00, 0xe12fff1e)
+            self.word(0x1f00, branch(0x1f00, 0x1040, 0xeb000000))
+            self.word(0x1f04, 0xe12fff1e)
+            for address in (0x2800, 0x2840):
+                for index, value in enumerate(RPM_OFFSETS):
+                    self.word(address+index*4, value)
+            self.payload = self.payload.replace(MARKERS[-1], b'X'*len(MARKERS[-1]))
+            marker = RPM_START+b'\0'+RPM_FINISH+b'\0'
+            self.payload[0x1600:0x1600+len(marker)] = marker
         if irq_only:
             self.config += '#define STAGE90_GUARDED_IRQ_ONLY 1\n'
             extra = {'stage90_vectors': (0x1700, 32),
@@ -250,7 +279,7 @@ class Fixture:
     def symbol(self, name, size=None, address=None, remove=False, entry=False):
         attr = 'entry_nm' if entry else 'nm'
         text = getattr(self, attr)
-        pattern = r'^([0-9a-f]+) ([0-9a-f]+) ([TBb]) ' + re.escape(name) + r'\n'
+        pattern = r'^([0-9a-f]+) ([0-9a-f]+) ([TtBRbr]) ' + re.escape(name) + r'\n'
         def replace(match):
             return '' if remove else (f'{address if address is not None else int(match[1],16):08x} '
                                       f'{size if size is not None else int(match[2],16):08x} {match[3]} {name}\n')
@@ -343,7 +372,8 @@ class CheckerTests(unittest.TestCase):
                                     recovery_only=fixture.recovery_only,
                                     clock_snapshot=fixture.clock_snapshot,
                                     root_snapshot=fixture.root_snapshot,
-                                    store_selftest=fixture.store_selftest)
+                                    store_selftest=fixture.store_selftest,
+                                    rpm_snapshot=fixture.rpm_snapshot)
             return output.getvalue(), calls.call_count
 
     def test_complete_positive_fixture(self):
@@ -856,12 +886,152 @@ class CheckerTests(unittest.TestCase):
                     CHECKER.main()
             self.assertEqual(error.exception.code, 2)
 
+    def test_rpm_snapshot_positive_inline_and_outlined(self):
+        for outlined in (False, True):
+            fixture = Fixture(irq_only=True, rpm_snapshot=True)
+            self.outline_selftests(fixture, outlined, False)
+            output, calls = self.inspect_fixture(fixture)
+            self.assertIn('PASS:', output)
+            self.assertIn('no runtime mapping, universal CFG', output)
+            self.assertEqual(calls, 3)
+
+    def test_rpm_snapshot_raw_tables_and_symbol_contracts(self):
+        original = Fixture(irq_only=True, rpm_snapshot=True)
+        tables = (('rpm_rbcpr_sample_offsets', 0x2800), ('rpm_probe_offsets', 0x2840))
+        for name, address in tables:
+            for index in range(10):
+                fixture = copy.deepcopy(original)
+                fixture.word(address+index*4, 0xfc400108)
+                self.assertEqual((fixture.nm, fixture.dis), (original.nm, original.dis))
+                with self.subTest(table=name, index=index), self.assertRaisesRegex(ValueError, 'RPM snapshot offset table'):
+                    self.inspect_fixture(fixture)
+            for changes in ({'size': 36}, {'remove': True}, {'address': 0x28f0}):
+                fixture = copy.deepcopy(original)
+                fixture.symbol(name, **changes)
+                with self.subTest(table=name, changes=changes), self.assertRaisesRegex(ValueError, 'offset table|unbacked'):
+                    self.inspect_fixture(fixture)
+        for name in ('mi4_rpm_rbcpr_snapshot', 'rpm_probe_read'):
+            for changes in ({'size': 0}, {'remove': True}, {'address': 0x2900}):
+                fixture = copy.deepcopy(original)
+                fixture.symbol(name, **changes)
+                with self.subTest(symbol=name, changes=changes), self.assertRaisesRegex(ValueError, 'missing linked symbol|unbacked'):
+                    self.inspect_fixture(fixture)
+        for changes in ({'size': 56}, {'size': 0}, {'remove': True}):
+            fixture = copy.deepcopy(original)
+            fixture.symbol('stage90_guarded_read32_state', **changes)
+            with self.assertRaisesRegex(ValueError, 'state B-symbol size'):
+                self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        fixture.nm = fixture.nm.replace('00000034 B stage90_guarded_read32_state', '00000034 T stage90_guarded_read32_state')
+        with self.assertRaisesRegex(ValueError, 'state B-symbol size'):
+            self.inspect_fixture(fixture)
+        for suffix in ('', '_store_arm', '_fault', '_recovery', '_unexpected'):
+            fixture = copy.deepcopy(original)
+            fixture.nm += '00002300 00000004 T stage90_guarded_write32'+suffix+'\n'
+            with self.assertRaisesRegex(ValueError, 'guarded-write capability'):
+                self.inspect_fixture(fixture)
+
+    def test_rpm_snapshot_configuration_and_legacy_compatibility(self):
+        original = Fixture(irq_only=True, rpm_snapshot=True)
+        for name in ('RPM_RBCPR_SNAPSHOT', 'GUARDED_IRQ_ONLY', 'DWC3_READONLY', 'DWC3_TARGET_READS'):
+            for value in ('0', '2', '-1', 'RPM_ALIAS', None):
+                fixture = copy.deepcopy(original)
+                if value is None:
+                    fixture.config = re.sub(r'#define STAGE90_'+name+r' \S+\n', '', fixture.config)
+                else:
+                    fixture.define(name, value)
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    self.inspect_fixture(fixture)
+        for name in ('GUARDED_STORE32', 'GUARDED_STORE_SELFTEST', 'DWC3_CLOCK_SNAPSHOT', 'DWC3_ROOT_SNAPSHOT'):
+            for value in ('1', '2', 'RPM_ALIAS'):
+                fixture = copy.deepcopy(original)
+                fixture.config += '#define STAGE90_'+name+' '+value+'\n'
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        for name in ('RPM_RBCPR_SNAPSHOT', 'GUARDED_IRQ_ONLY', 'DWC3_READONLY', 'DWC3_TARGET_READS'):
+            fixture.define(name, '0x1ULL')
+        for name in ('GUARDED_STORE32', 'GUARDED_STORE_SELFTEST', 'DWC3_CLOCK_SNAPSHOT', 'DWC3_ROOT_SNAPSHOT'):
+            fixture.config += '#define STAGE90_'+name+' 0UL\n'
+        self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+        fixture = copy.deepcopy(original)
+        fixture.irq_only = False
+        with self.assertRaisesRegex(ValueError, 'requires --irq-only'):
+            self.inspect_fixture(fixture)
+        for other in ('clock_snapshot', 'root_snapshot', 'store_selftest', 'recovery_only'):
+            fixture = copy.deepcopy(original)
+            setattr(fixture, other, True)
+            with self.assertRaisesRegex(ValueError, 'mutually exclusive'):
+                self.inspect_fixture(fixture)
+        for mode in ({}, {'irq_only': True}, {'recovery_only': True}, {'clock_snapshot': True},
+                     {'root_snapshot': True}, {'irq_only': True, 'store_selftest': True}):
+            fixture = Fixture(**mode)
+            self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+            fixture.config += '#define STAGE90_RPM_RBCPR_SNAPSHOT 0\n'
+            self.assertIn('PASS:', self.inspect_fixture(fixture)[0])
+            fixture.define('RPM_RBCPR_SNAPSHOT', '1')
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'RPM_RBCPR_SNAPSHOT'):
+                self.inspect_fixture(fixture)
+
+    def test_rpm_snapshot_calls_order_and_diagnostics(self):
+        original = Fixture(irq_only=True, rpm_snapshot=True)
+        cases = [
+            ('missing core', 'exactly once', lambda f: setattr(f, 'dis', f.dis.replace('bl 1c00 <mi4_rpm_rbcpr_snapshot>', 'b 1c00 <mi4_rpm_rbcpr_snapshot>'))),
+            ('duplicate core', 'exactly once', lambda f: setattr(f, 'dis', f.dis.replace('bl 1c00 <mi4_rpm_rbcpr_snapshot>', 'bl 1c00 <mi4_rpm_rbcpr_snapshot>\n bl 1c00 <mi4_rpm_rbcpr_snapshot>'))),
+            ('missing guard', 'exactly five', lambda f: setattr(f, 'dis', f.dis.replace('bl 1040 <stage90_guarded_read32>', 'b 1040 <stage90_guarded_read32>', 1))),
+            ('extra guard', 'exactly five', lambda f: setattr(f, 'dis', f.dis.replace('bl 1040 <stage90_guarded_read32>', 'bl 1040 <stage90_guarded_read32>\n bl 1040 <stage90_guarded_read32>', 1))),
+            ('early core', 'precedes guarded', lambda f: setattr(f, 'dis', f.dis.replace('  1414: eb000000 bl 1c00 <mi4_rpm_rbcpr_snapshot>', '').replace('  1400:', ' bl 1c00 <mi4_rpm_rbcpr_snapshot>\n  1400:', 1))),
+            ('callback no guard', 'callback must directly', lambda f: setattr(f, 'dis', f.dis.replace('  1f00: eb000000 bl 1040 <stage90_guarded_read32>', '  1f00: eb000000 b 1040 <stage90_guarded_read32>'))),
+            ('callback double guard', 'callback must directly', lambda f: setattr(f, 'dis', f.dis+' bl 1040 <stage90_guarded_read32>\n')),
+        ]
+        forbidden = ('mi4_dwc3_identify', 'mi4_dwc3_clock_snapshot', 'mi4_dwc3_root_snapshot',
+                     'stage90_guarded_write32', 'dwc3_probe_store_selftest', 'dwc3_probe_read',
+                     'usb_preboot_run', 'entry_usb_stream_poll')
+        for name in forbidden:
+            cases.append((name, 'retains controller|non-store probe', lambda f, n=name:
+                setattr(f, 'dis', f.dis.replace('  1400:', ' bl 1500 <'+n+'>\n  1400:', 1))))
+            cases.append(('callback '+name, 'retains controller', lambda f, n=name:
+                setattr(f, 'dis', f.dis+' bl 1500 <'+n+'>\n')))
+        for marker in (RPM_START, RPM_FINISH):
+            cases.append((repr(marker), 'diagnostic', lambda f, m=marker:
+                setattr(f, 'payload', f.payload.replace(m, b'X'*len(m)))))
+        for name, error, mutate in cases:
+            fixture = copy.deepcopy(original)
+            mutate(fixture)
+            with self.subTest(case=name), self.assertRaisesRegex(ValueError, error):
+                self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        self.outline_selftests(fixture, True, False)
+        fixture.dis += ' bl 1500 <mi4_dwc3_identify>\n'
+        with self.assertRaisesRegex(ValueError, 'retains controller'):
+            self.inspect_fixture(fixture)
+        fixture = copy.deepcopy(original)
+        self.outline_selftests(fixture, True, False)
+        fixture.dis = fixture.dis.replace('bl 1d00 <dwc3_probe_guard_selftest>', 'b 1d00 <dwc3_probe_guard_selftest>')
+        with self.assertRaisesRegex(ValueError, 'directly called exactly once'):
+            self.inspect_fixture(fixture)
+        for mode in ({}, {'recovery_only': True}, {'clock_snapshot': True}, {'root_snapshot': True},
+                     {'irq_only': True, 'store_selftest': True}):
+            fixture = Fixture(**mode)
+            fixture.dis = fixture.dis.replace('  1400:', ' bl 1c00 <mi4_rpm_rbcpr_snapshot>\n  1400:', 1)
+            with self.assertRaisesRegex(ValueError, 'non-RPM probe'):
+                self.inspect_fixture(fixture)
+
+    def test_rpm_snapshot_cli_exclusion_and_irq_requirement(self):
+        required = ['checker', '--payload', 'p', '--entry', 'e', '--config', 'c']
+        for mode in ('--clock-snapshot', '--root-snapshot', '--store-selftest', '--recovery-only', None):
+            flags = ['--rpm-snapshot'] if mode is None else ['--irq-only', '--rpm-snapshot', mode]
+            with mock.patch.object(sys, 'argv', required+flags), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    CHECKER.main()
+            self.assertEqual(error.exception.code, 2)
+
     def test_cli_modes_are_explicit(self):
         required = ['--payload', 'p', '--entry', 'e', '--config', 'c']
         for flags in ([], ['--irq-only'], ['--irq-only', '--recovery-only'],
                       ['--clock-snapshot'], ['--irq-only', '--clock-snapshot'],
                       ['--root-snapshot'], ['--irq-only', '--root-snapshot'],
-                      ['--irq-only', '--store-selftest']):
+                      ['--irq-only', '--store-selftest'], ['--irq-only', '--rpm-snapshot']):
             with self.subTest(flags=flags), mock.patch.object(sys, 'argv', ['checker']+required+flags):
                 with mock.patch.object(CHECKER, 'inspect') as inspect:
                     CHECKER.main()
@@ -869,7 +1039,8 @@ class CheckerTests(unittest.TestCase):
                         irq_only='--irq-only' in flags, recovery_only='--recovery-only' in flags,
                         clock_snapshot='--clock-snapshot' in flags,
                         root_snapshot='--root-snapshot' in flags,
-                         store_selftest='--store-selftest' in flags)
+                         store_selftest='--store-selftest' in flags,
+                         rpm_snapshot='--rpm-snapshot' in flags)
 
 
 class ElfReaderTests(unittest.TestCase):

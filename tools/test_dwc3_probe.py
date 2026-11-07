@@ -63,7 +63,26 @@ static uint32_t en=1u, first=200u, second=220u;
 static struct stage90_hw_watchdog_result wd;
 static struct effects { unsigned reads, logs, textbytes, mmu, watchdogs, deadmans, delays, ticks; } effects;
 static char text[1024];
-static struct { const char *key; uint32_t value; } logs[128];
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+#include "rpm_rbcpr_snapshot.h"
+#define MAX_LOGS 256u
+static struct { const char *key; uint32_t value; } logs[MAX_LOGS];
+static uint32_t golden[] = {
+    0u,0xdeadc000u,0xf9017008u,0xf901700cu,0xf901700cu,
+    0xfc190010u,0xfc191000u,0xfc191004u,0xfc191008u,0xfc19100cu,0xfc191014u,
+    0xfc19105cu,0xfc1910a4u,0xfc1910e8u,0xfc1910ecu,0xfc191004u,0xfc190010u,
+    0xfc190010u,0xfc191000u,0xfc191004u,0xfc191008u,0xfc19100cu,0xfc191014u,
+    0xfc19105cu,0xfc1910a4u,0xfc1910e8u,0xfc1910ecu,0xfc191004u,0xfc190010u
+};
+static uint32_t values[24] = {
+    0x191000u,2u,7u,3u,3u,0x123u,0x456u,0x789u,2u,0xabcdefu,7u,0x191000u,
+    0x191000u,2u,7u,3u,3u,0x123u,0x456u,0x789u,2u,0xabcdefu,7u,0x191000u
+};
+static uint32_t seen[32];
+#define TARGET_COUNT 24u
+#else
+#define MAX_LOGS 128u
+static struct { const char *key; uint32_t value; } logs[MAX_LOGS];
 static uint32_t golden[] = {
     0u,0xdeadc000u,0xf9017008u,0xf901700cu,0xf901700cu,
     0xfc400108u,0xfc4003c8u,0xfc4003d0u,0xfc4003ccu,0xfc4004acu,
@@ -84,6 +103,7 @@ static uint32_t seen[20];
 #define TARGET_COUNT 7u
 #else
 #define TARGET_COUNT 15u
+#endif
 #endif
 #include "actual-probe.c"
 uint32_t *mmu_l1_table(void) { ++effects.mmu; return null_table ? NULL : l1; }
@@ -120,10 +140,16 @@ void xnu_log_kv32(const char *key, uint32_t value)
         "dwc3_store_fault_result","dwc3_store_fault_dfsr","dwc3_store_fault_dfar","dwc3_store_fault_pc",
         "dwc3_store_fault_expected_pc","dwc3_store_fault_spsr","dwc3_store_fault_count",
         "dwc3_store_fault_active","dwc3_store_fault_status","dwc3_store_fault_operation",
-        "dwc3_store_fault_cpsr_before","dwc3_store_fault_cpsr_after","dwc3_store_fault_cpsr_restored"};
+        "dwc3_store_fault_cpsr_before","dwc3_store_fault_cpsr_after","dwc3_store_fault_cpsr_restored"
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+        ,"rpm_ro_read_index","rpm_ro_read_address","rpm_ro_read_result","rpm_ro_read_value",
+        "rpm_ro_status","rpm_ro_completed_reads","rpm_ro_attempted_reads","rpm_ro_failed_slot",
+        "rpm_ro_sample_zero_valid","rpm_ro_sample_one_valid"
+#endif
+    };
     unsigned i;
     for(i=0;i<sizeof(keys)/sizeof(keys[0]);++i) if(!strcmp(key,keys[i])) break;
-    CHECK(i<sizeof(keys)/sizeof(keys[0]) && effects.logs<128u);
+    CHECK(i<sizeof(keys)/sizeof(keys[0]) && effects.logs<MAX_LOGS);
     logs[effects.logs].key=keys[i]; logs[effects.logs++].value=value;
 }
 static void kv(const char *key, uint32_t value)
@@ -135,16 +161,21 @@ static void kv(const char *key, uint32_t value)
 int stage90_guarded_read32(uint32_t address, uint32_t *out)
 {
     unsigned i=effects.reads++;
-    CHECK(i<20u && out!=NULL); seen[i]=address;
+    CHECK(i<sizeof(seen)/sizeof(seen[0]) && out!=NULL); seen[i]=address;
     if(direct) {
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+        if((int)i==fail) { *out=0x191000u; return -7; }
+        *out=address==0xfc190010u ? values[0] : 1u; return 0;
+#else
         CHECK(address==golden[5]);
         if((int)i==fail) return -7;
         *out=1u; return 0;
+#endif
     }
     if(i==0u) {
         unsigned j;
         CHECK(address!=0u && (address&3u)==0u);
-#if STAGE90_DWC3_ROOT_SNAPSHOT
+#if STAGE90_DWC3_ROOT_SNAPSHOT || STAGE90_RPM_RBCPR_SNAPSHOT
         for(j=1u;j<sizeof(golden)/sizeof(golden[0]);++j) CHECK(address!=golden[j]);
 #else
         for(j=1u;j<20u;++j) CHECK(address!=golden[j]);
@@ -219,7 +250,12 @@ int stage90_guarded_read32(uint32_t address, uint32_t *out)
     }
     CHECK(*out==0u); /* Ordinary failed reads never poison or write the output. */
     stage90_guarded_read32_state=(struct stage90_guarded_read32_state){0};
-    if((int)i==fail) return -7;
+    if((int)i==fail) {
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+        *out=0x191000u;
+#endif
+        return -7;
+    }
     *out=i==2u ? en : i==3u ? first : i==4u ? second : values[i-5u];
     return 0;
 }
@@ -268,6 +304,38 @@ int stage90_guarded_write32(uint32_t address, uint32_t value)
     return store_case==26 ? 0 : STAGE90_GUARDED_WRITE_FAULT;
 }
 #endif
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+static void callback_checks(void)
+{
+    struct rpm_probe_context ctx={0};
+    uint32_t value=0x12345678u;
+    static const uint32_t bad[]={0u,0xfc191000u,0xf9017008u,0xfc400108u,0xf920c120u,0xfc190011u,0xffffffffu};
+    unsigned i;
+    direct=1;
+    for(i=0;i<sizeof(bad)/sizeof(bad[0]);++i) CHECK(rpm_probe_read(&ctx,bad[i],&value)!=0);
+    CHECK(rpm_probe_read(NULL,0xfc190010u,&value)!=0);
+    CHECK(rpm_probe_read(&ctx,0xfc190010u,NULL)!=0);
+    ctx.attempted=24u; CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)!=0);
+    ctx.attempted=0u;now=10000u;CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)!=0);
+    CHECK(effects.reads==0u && effects.logs==0u && ctx.attempted==0u && value==0x12345678u);
+    now=9999u;CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)==0);
+    CHECK(ctx.block==0xfc191000u && ctx.phase==1u && ctx.attempted==1u);
+    CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)!=0);
+    CHECK(rpm_probe_read(&ctx,0xfc191004u,&value)!=0);
+    CHECK(rpm_probe_read(&ctx,0xfc191000u,&value)==0 && ctx.phase==2u);
+    ctx.phase=0u;ctx.attempted=23u;
+    CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)==0 && ctx.attempted==24u);
+    CHECK(rpm_probe_read(&ctx,0xfc191000u,&value)!=0 && effects.reads==3u);
+    ctx=(struct rpm_probe_context){0}; fail=(int)effects.reads;
+    CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)==-7);
+    CHECK(ctx.block==0u && ctx.stopped==1u && ctx.phase==0u && ctx.attempted==1u);
+    fail=-1;CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)!=0 && effects.reads==4u);
+    ctx=(struct rpm_probe_context){0};values[0]=0x191001u;
+    CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)==0 && ctx.block==0u);
+    CHECK(rpm_probe_read(&ctx,0xfc191000u,&value)!=0 && effects.reads==5u);
+    ctx.phase=12u;CHECK(rpm_probe_read(&ctx,0xfc190010u,&value)!=0);
+}
+#else
 static void callback_checks(void)
 {
     struct dwc3_probe_context ctx={0u,0u};
@@ -300,6 +368,7 @@ static void callback_checks(void)
     CHECK(dwc3_probe_read(&ctx,golden[5],&value)==-7 && value==0xabcdef01u);
     CHECK(ctx.attempted==1u && effects.reads==2u);
 }
+#endif
 #if STAGE90_GUARDED_STORE_SELFTEST
 static void store_verify(unsigned expected_reads, unsigned expected_stores, const char *skip)
 {
@@ -345,8 +414,119 @@ static void store_verify(unsigned expected_reads, unsigned expected_stores, cons
     CHECK(!memcmp(&saved,&effects,sizeof(saved)) && !memcmp(&before,&after,sizeof(after)) && writes==store_calls);
 }
 #endif
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+static int rpm_main(int argc, char **argv)
+{
+    const char *name, *skip=NULL;
+    unsigned p,i,expected=29u,completed=24u,attempts=24u,slot=24u,status=MI4_RPM_RBCPR_OK;
+    unsigned summary=1u,delays=1u,read_logs=0u,value_logs=0u,result_logs=0u;
+    struct effects saved;
+    struct stage90_guarded_read32_state before,after;
+    CHECK(argc==3);name=argv[1];p=(unsigned)strtoul(argv[2],NULL,10);
+    fake_vbar=(uint32_t)(uintptr_t)stage90_vectors;fake_ttbr0=(uint32_t)(uintptr_t)l1;
+    CHECK((fake_ttbr0&0x3fffu)==0u && sizeof(l1)==16384u);
+    l1[0xf92]=0xf9200000u|STAGE90_PMAP_DESC_SECTION_SO;
+    l1[0xfc4]=0xfc400000u|STAGE90_PMAP_DESC_SECTION_SO;
+    l1[0xfc1]=0xfc100000u|STAGE90_PMAP_DESC_SECTION_SO;
+    wd.enabled=wd.counter_running=wd.countdown_plausible=wd.readback_ok=1u;wd.bark_ticks=100000u;
+    if(!strcmp(name,"callback")) { callback_checks();printf("PASS %u\n",checks);return 0; }
+    if(!strcmp(name,"fiq")) { CHECK(p<2u);saved_f=p ? 0x40u : 0u;fake_cpsr|=saved_f; }
+    else if(!strcmp(name,"irq-state")) {
+        CHECK(p<16u);irq_case=(int)p;
+        if(p<13u) { expected=2u;summary=delays=0u;skip="guard translation-fault selftest failed"; }
+    } else if(!strcmp(name,"cpu")) {
+        static const unsigned cb[]={0,1,2,3,4,5,9,24},sb[]={0,2,13,25,28,30};
+        CHECK(p<14u);if(p<8u)fake_cpsr^=1u<<cb[p];else fake_sctlr^=1u<<sb[p-8u];
+        skip="CPU/MMU/vector precondition";
+    } else if(!strcmp(name,"precondition")) {
+        CHECK(p<8u);switch(p) { case 0:fake_ttbcr=1u;break;case 1:fake_vbar^=4u;break;
+        case 2:fake_ttbr0^=0x4000u;break;case 3:case 4:case 5:fake_dacr=p-3u;break;
+        case 6:null_table=1;break;case 7:fake_cpsr=0x12u;break; }skip="CPU/MMU/vector precondition";
+    } else if(!strcmp(name,"mapping")) {
+        CHECK(p<4u);l1[p<2u ? 0xf92 : 0xfc4]=p%2u ? 0xf9200c02u : 0u;
+        skip="identity MMIO mapping mismatch";
+    } else if(!strcmp(name,"rpm-mapping")) { l1[0xfc1]=0u;skip="RPM data mapping mismatch"; }
+    else if(!strcmp(name,"watchdog")) {
+        CHECK(p<7u);switch(p) { case 0:null_watchdog=1;break;case 1:wd.enabled=0u;break;
+        case 2:wd.counter_running=0u;break;case 3:wd.countdown_plausible=0u;break;
+        case 4:wd.readback_ok=0u;break;case 5:wd.bite_truncated=1u;break;case 6:deadman=0;break; }
+        skip="recovery net not confirmed";
+    } else if(!strcmp(name,"selftest")) {
+        CHECK(p<19u);guard_case=(int)p;summary=delays=0u;
+        if(p==0u) { l1[0xdea]=1u;expected=0u;skip="guard selftest address is mapped"; }
+        else if(p<3u || p>=16u) { expected=1u;skip="guard RAM selftest failed"; }
+        else { expected=2u;skip="guard translation-fault selftest failed"; }
+    } else if(!strcmp(name,"en-off")) { en=0u;expected=3u;summary=delays=0u; }
+    else if(!strcmp(name,"counter")) {
+        CHECK(p<7u);switch(p) { case 0:second=first;break;case 1:second=first-2u;break;
+        case 2:wd.bark_ticks=110u;break;case 3:wd.bark_ticks=109u;break;
+        case 4:wd.bark_ticks=110u+65529u;break;case 5:wd.bark_ticks=110u+65530u;break;
+        case 6:first|=0xffe00001u;second|=0xffe00001u;break; }
+        if(p<5u) { expected=5u;summary=0u; }
+    } else if(!strcmp(name,"fault")) {
+        CHECK(p<27u);fail=(int)p+2;expected=p+3u;
+        if(p<3u) { summary=0u;delays=p==2u; }
+        else { slot=completed=p-3u;attempts=slot+1u;status=MI4_RPM_RBCPR_READ_FAILED; }
+    } else if(!strcmp(name,"rpm-budget")) {
+        CHECK(p<24u);step=10000u/(p+1u)+1u;expected=5u+p;completed=slot=p;
+        attempts=p+1u;status=MI4_RPM_RBCPR_READ_FAILED;
+    } else if(!strcmp(name,"rpm-pointer")) {
+        static const uint32_t bad[]={0u,0x190010u,0x19f800u,0x191001u,0xfc191000u,0xffffffffu};
+        CHECK(p<6u);values[0]=bad[p];expected=6u;completed=attempts=1u;slot=0u;status=MI4_RPM_RBCPR_BAD_POINTER;
+    } else if(!strcmp(name,"rpm-layout")) {
+        static const unsigned indices[]={1,1,3,4,8};static const uint32_t bad[]={0u,3u,2u,4u,4u};
+        CHECK(p<5u);slot=indices[p];values[slot]=bad[p];completed=attempts=slot+1u;
+        expected=5u+completed;status=MI4_RPM_RBCPR_BAD_LAYOUT;
+    } else if(!strcmp(name,"rpm-drift")) {
+        CHECK(p<6u);slot=p==0u ? 10u : p==1u ? 11u : p==2u ? 12u : p==3u ? 22u : 23u;
+        if(p==0u || p==3u) values[slot]^=1u;
+        else if(p<3u) values[slot]+=4u;
+        else if(p==4u) values[23]+=4u;
+        else values[17]^=1u;
+        completed=attempts=slot+1u;expected=5u+completed;status=MI4_RPM_RBCPR_CHANGED;
+    } else if(!strcmp(name,"rpm-corner")) { CHECK(p<4u);values[8]=values[20]=p; }
+    else if(!strcmp(name,"rpm-rails-one")) { values[1]=values[13]=1u; }
+    else CHECK(!strcmp(name,"golden"));
+    if(skip && guard_case<0 && irq_case<0) expected=summary=delays=0u;
+    stage90_dwc3_readonly_probe();
+    CHECK(effects.reads==expected && effects.delays==delays);
+    for(i=0;i<expected;++i) CHECK(seen[i]==golden[i]);
+    CHECK(strstr(text,"RPM RBCPR V2 read-only snapshot; no clock or supply writes")!=NULL);
+    CHECK((strstr(text,"rpm_ro finished; sampled telemetry only; no clock-write authorization")!=NULL)==summary);
+    CHECK(strstr(text,"DWC3 read-only")==NULL && strstr(text,"dwc3_ro finished;")==NULL);
+    CHECK(strstr(text,"power_safe")==NULL && strstr(text,"nominal permission")==NULL);
+    if(skip) CHECK(strstr(text,skip)!=NULL);
+    if(expected>0u) kv("dwc3_ro_guard_ram_address",golden[0]);
+    if(expected>1u) kv("dwc3_ro_guard_fault_address",0xdeadc000u);
+    for(i=0;i<effects.logs;++i) {
+        CHECK(strncmp(logs[i].key,"dwc3_ro_read_",13)!=0);
+        CHECK(strncmp(logs[i].key,"dwc3_store_",11)!=0);
+        if(!strcmp(logs[i].key,"rpm_ro_read_index")) CHECK(logs[i].value==++read_logs);
+        if(!strcmp(logs[i].key,"rpm_ro_read_address")) CHECK(read_logs>0u && logs[i].value==golden[read_logs+4u]);
+        if(!strcmp(logs[i].key,"rpm_ro_read_result")) { CHECK(logs[i].value==(fail>=5 && read_logs==(unsigned)fail-4u ? (uint32_t)-7 : 0u));++result_logs; }
+        if(!strcmp(logs[i].key,"rpm_ro_read_value")) { CHECK(read_logs>0u && logs[i].value==values[read_logs-1u]);++value_logs; }
+    }
+    CHECK(read_logs==(expected>5u ? expected-5u : 0u) && result_logs==read_logs);
+    CHECK(value_logs==read_logs-(fail>=5 ? 1u : 0u));
+    if(summary) {
+        unsigned mask0=completed>=12u ? 0xfffu : (1u<<completed)-1u;
+        unsigned mask1=completed>12u ? (1u<<(completed-12u))-1u : 0u;
+        kv("rpm_ro_status",status);kv("rpm_ro_completed_reads",completed);
+        kv("rpm_ro_attempted_reads",attempts);kv("rpm_ro_failed_slot",slot);
+        kv("rpm_ro_sample_zero_valid",mask0);kv("rpm_ro_sample_one_valid",mask1);
+        kv("dwc3_ro_watchdog_count_first",100u);kv("dwc3_ro_watchdog_count_second",110u);
+    }
+    saved=effects;before=stage90_guarded_read32_state;
+    stage90_dwc3_readonly_probe();after=stage90_guarded_read32_state;
+    CHECK(!memcmp(&saved,&effects,sizeof(saved)) && !memcmp(&before,&after,sizeof(after)));
+    printf("PASS %u\n",checks);return 0;
+}
+#endif
 int main(int argc, char **argv)
 {
+#if STAGE90_RPM_RBCPR_SNAPSHOT
+    return rpm_main(argc,argv);
+#else
     const char *name;
     unsigned p, expected=TARGET_COUNT+5u, completed=TARGET_COUNT, slot=UINT32_MAX, status=MI4_DWC3_IDENTIFY_OK;
     unsigned clocks=31u, regs=STAGE90_DWC3_CLOCK_SNAPSHOT ? 0u : 255u;
@@ -537,6 +717,7 @@ int main(int argc, char **argv)
     stage90_dwc3_readonly_probe(); after=stage90_guarded_read32_state;
     CHECK(!memcmp(&saved,&effects,sizeof(saved)) && !memcmp(&saved_state,&after,sizeof(after)));
     printf("PASS %u\n",checks); return 0;
+#endif
 }
 #else
 #include "actual-probe.c"
@@ -593,7 +774,8 @@ def main():
     args = parser.parse_args(); root = args.repo_root.resolve(); cc = shlex.split(args.cc)
     if not cc: raise ValueError('empty compiler command')
     names = ['dwc3_probe.c', 'dwc3_identify.c', 'dwc3_identify.h', 'stage90.h',
-             'stage90_guarded_read32.h', 'stage90_guarded_profile.h']
+             'stage90_guarded_read32.h', 'stage90_guarded_profile.h',
+             'rpm_rbcpr_snapshot.h', 'rpm_rbcpr_snapshot.c']
     files = [root/'src'/name for name in names]; snapshots = [p.read_bytes() for p in files]
     source = cpu_fixture(snapshots[0].decode())
     cases = [('golden', 0), ('callback', 0), ('en-off', 0), ('reset', 0), ('id', 0), ('deadline', 0)]
@@ -605,10 +787,12 @@ def main():
         for name, content in [('stage90.h', stage90_stub(snapshots[3].decode())),
                               ('stage90_guarded_read32.h', snapshots[4].decode()),
                               ('stage90_guarded_profile.h', snapshots[5].decode()), ('harness.c', HARNESS),
-                              ('dwc3_identify.c', snapshots[1].decode()), ('dwc3_identify.h', snapshots[2].decode())]:
+                              ('dwc3_identify.c', snapshots[1].decode()), ('dwc3_identify.h', snapshots[2].decode()),
+                              ('rpm_rbcpr_snapshot.h', snapshots[6].decode()),
+                              ('rpm_rbcpr_snapshot.c', snapshots[7].decode())]:
             (directory/name).write_text(content)
         def build(label, probe, enabled=1, target=1, irq=0, snapshot=0, root_snapshot=0,
-                  store32=0, store_selftest=0, compile_error=None):
+                  store32=0, store_selftest=0, rpm=0, compile_error=None):
             (directory/'actual-probe.c').write_text(probe)
             binary = directory/label
             flags = ['-std=c11', '-O0', '-Wall', '-Wextra', '-Werror', '-pedantic',
@@ -618,9 +802,11 @@ def main():
                      '-DSTAGE90_DWC3_ROOT_SNAPSHOT='+str(root_snapshot),
                      '-DSTAGE90_GUARDED_STORE32='+str(store32),
                      '-DSTAGE90_GUARDED_STORE_SELFTEST='+str(store_selftest),
+                     '-DSTAGE90_RPM_RBCPR_SNAPSHOT='+str(rpm),
                      '-DSTAGE90_GUARDED_IRQ_ONLY='+str(irq), '-I', str(directory)]
             if args.sanitize: flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
-            result = command(cc+flags+[str(directory/'harness.c'), str(directory/'dwc3_identify.c'), '-o', str(binary)])
+            result = command(cc+flags+[str(directory/'harness.c'), str(directory/'dwc3_identify.c'),
+                                       str(directory/'rpm_rbcpr_snapshot.c'), '-o', str(binary)])
             if compile_error is not None:
                 if result.returncode == 0 or compile_error not in result.stderr:
                     raise ValueError(label+' failed to reject invalid snapshot mode:\n'+result.stderr)
@@ -663,6 +849,35 @@ def main():
         store_binary=build('irq-store-selftest',source,target=0,irq=1,store32=1,store_selftest=1)
         store_assertions=sum(run(store_binary,case) for case in store_cases)
         print('PASS profile: irq-store-selftest',len(store_cases),'cases,',store_assertions,'C assertions')
+        rpm_cases=recovery_cases+[('callback',0),('en-off',0),('rpm-mapping',0),('rpm-rails-one',0)]
+        for name,count in [('fault',27),('counter',7),('rpm-budget',24),('rpm-pointer',6),
+                           ('rpm-layout',5),('rpm-drift',6),('rpm-corner',4)]:
+            rpm_cases.extend((name,i) for i in range(count))
+        rpm_binary=build('irq-rpm-snapshot',source,target=1,irq=1,rpm=1)
+        rpm_assertions=sum(run(rpm_binary,case) for case in rpm_cases)
+        print('PASS profile: irq-rpm-snapshot',len(rpm_cases),'cases,',rpm_assertions,'C assertions')
+        for label,old,new in (
+                ('rpm-address-whitelist','!rpm_probe_address_allowed(context, address)',
+                 '(0 && !rpm_probe_address_allowed(context, address))'),
+                ('rpm-target-cap','context->attempted >= 24u ||','context->attempted >= 25u ||')):
+            binary=build(label,replace_once(source,old,new),target=1,irq=1,rpm=1)
+            result=command([str(binary),'callback','0'])
+            if result.returncode==0 or 'CHECK line ' not in result.stderr:
+                raise ValueError('RPM negative must fail a C assertion: '+label+'\n'+result.stderr)
+            print('PASS negative:',label,'rejected by actual C behavior')
+        marker='STAGE90_RPM_RBCPR_SNAPSHOT_requires_READONLY_IRQ_ONLY_TARGET_and_no_STORE_CLOCK_ROOT'
+        for label,extra,expected_marker in (
+                ('rpm-not-bool',{'rpm':2},'STAGE90_RPM_RBCPR_SNAPSHOT_must_be_zero_or_one'),
+                ('rpm-needs-readonly',{'enabled':0},marker),
+                ('rpm-needs-target',{'target':0},marker),
+                ('rpm-needs-irq',{'irq':0},marker),
+                ('rpm-forbids-store',{'store32':1},'STAGE90_RPM_RBCPR_SNAPSHOT_requires_STORE32_zero'),
+                ('rpm-forbids-selftest',{'store_selftest':1},marker),
+                ('rpm-forbids-clock',{'snapshot':1},marker),
+                ('rpm-forbids-root',{'root_snapshot':1},marker)):
+            options=dict(target=1,irq=1,rpm=1);options.update(extra)
+            build(label,source,compile_error=expected_marker,**options)
+            print('PASS invalid mode:',label,'rejected by explicit compile-time contract')
         gate = ('if (!watchdog || !watchdog->enabled || !watchdog->counter_running ||\n'
                 '        !watchdog->countdown_plausible || !watchdog->readback_ok ||\n'
                 '        watchdog->bite_truncated || !stage90_deadman_armed())')

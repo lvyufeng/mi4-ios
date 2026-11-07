@@ -1,0 +1,657 @@
+{
+  "version": 1,
+  "description": "Full five-stage bounded RPM RBCPR V2 read-only snapshot; two passes, no clock/supply/medium writes; sampled telemetry is not freshness or voltage authorization",
+  "env": {
+    "LC_ALL": "C",
+    "XNU_TREE": "{repo_root}/external/xnu-hd2-darwin13/xnu",
+    "XNU_KERNEL_CONFIG": "STAGE90_XNU",
+    "XNU_MASTER_LOCAL": "{repo_root}/tools/xnu_config/boot/STAGE90_XNU.local",
+    "XNU_OBJ_SUFFIX": "_d13",
+    "STAGE90_ENTRY_LOCORE_OBJ": "{run_dir}/legacy-locore.o",
+    "STAGE90_ENTRY_ARM_CHANGE": "1",
+    "STAGE90_ENTRY_REAL_ARM_INIT": "1",
+    "STAGE90_ENTRY_TRACE": "1",
+    "STAGE90_XNU_ENTRY": "1",
+    "STAGE90_XNU_ENTRY_WINDOW": "0x04000000",
+    "STAGE90_XNU_RESIDENT": "1",
+    "STAGE90_XNU_HFS_ROOT_MEDIA": "1",
+    "STAGE90_XNU_EMMC_STRATEGY": "0",
+    "STAGE90_XNU_ROOT_FROM_CARD": "0",
+    "STAGE90_XNU_HDD_WRITE": "0",
+    "STAGE90_XNU_CARD_COW": "0",
+    "STAGE90_XNU_CARD_TOTAL": "0",
+    "STAGE90_XNU_HFS_ROOT_RW": "0",
+    "STAGE90_XNU_STORAGE_PROBE": "60",
+    "STAGE90_XNU_IMG_PC_PROBE": "1",
+    "STAGE90_XNU_MEM_TOTAL": "1",
+    "STAGE90_XNU_VM_MAX_SPLIT": "1",
+    "STAGE90_XNU_USTACK_PROBE": "1",
+    "STAGE90_XNU_ABT_ENTRY_PROBE": "1",
+    "STAGE90_XNU_H2_STACK_HEADROOM": "1",
+    "STAGE90_XNU_READER_PROBE": "1",
+    "STAGE90_XNU_WRITER_PROBE": "1",
+    "STAGE90_XNU_CALLER_PROBE": "1",
+    "STAGE90_XNU_EVAL_FRAME": "1",
+    "STAGE90_XNU_PC_CARRIER": "1",
+    "STAGE90_XNU_PC_CARRIER_CALLER": "1",
+    "STAGE90_XNU_TRAP_FRAME": "1",
+    "STAGE90_XNU_FRAME_CARRIER": "1",
+    "STAGE90_XNU_TREE_D13": "1",
+    "STAGE90_XNU_VMHINT_GUARD": "1",
+    "STAGE90_XNU_KEXTB_LOGIN": "1",
+    "STAGE90_XNU_SUBMAP_PMAP_SKIP": "1",
+    "STAGE90_XNU_SHREG_GEOM": "1",
+    "STAGE90_XNU_COMMPAGE_ALIAS": "1",
+    "STAGE90_XNU_IOS7_TRAPS": "0",
+    "STAGE90_XNU_IOS7_VMWIRE": "1",
+    "STAGE90_XNU_IOS7_TIMEBASE": "1",
+    "STAGE90_XNU_USB_PROBE": "0",
+    "STAGE90_XNU_USB_DEV": "0",
+    "STAGE90_XNU_USB_DEV_FORCE": "0",
+    "STAGE90_XNU_USB_DEV_STEPS": "0",
+    "STAGE90_XNU_USB_ENUM": "0",
+    "STAGE90_XNU_USB_STREAM": "0",
+    "STAGE90_EXTRA_CFLAGS": "-DSTAGE90_XNU_ENTRY=1 -DSTAGE90_USB_PREBOOT_WINDOW_US=4000000 -DSTAGE90_XNU_HFS_ROOT_MEDIA=1 -DSTAGE90_SKIP_USB_PREBOOT=1 -DSTAGE90_DWC3_READONLY=1 -DSTAGE90_HW_WATCHDOG=1 -DSTAGE90_DEADMAN_ENABLE=1",
+    "XNU_KERNEL_EXTRA_DEFINES": "-DSTAGE90_XNU_YIELD_AFTER_RESUME=1 -DSTAGE90_XNU_BSDDONE_REBOOT=1 -DSTAGE90_XNU_VMHINT_GUARD=1 -DSTAGE90_XNU_HFS_ROOT_MEDIA=1 -DSTAGE90_XNU_MEM_TOTAL=1 -DSTAGE90_XNU_VM_MAX_SPLIT=1 -DSTAGE90_XNU_USTACK_PROBE=1 -DSTAGE90_XNU_ABT_ENTRY_PROBE=1 -DSTAGE90_XNU_H2_STACK_HEADROOM=1 -DSTAGE90_XNU_READER_PROBE=1 -DSTAGE90_XNU_WRITER_PROBE=1 -DSTAGE90_XNU_CALLER_PROBE=1 -DSTAGE90_XNU_EVAL_FRAME=1 -DSTAGE90_XNU_PC_CARRIER=1 -DSTAGE90_XNU_PC_CARRIER_CALLER=1 -DSTAGE90_XNU_TRAP_FRAME=1 -DSTAGE90_XNU_FRAME_CARRIER=1 -DSTAGE90_XNU_TREE_D13=1 -DSTAGE90_XNU_KEXTB_LOGIN=1 -DSTAGE90_XNU_SUBMAP_PMAP_SKIP=1 -DSTAGE90_XNU_SHREG_GEOM=1 -DSTAGE90_XNU_COMMPAGE_ALIAS=1 -DSTAGE90_XNU_IOS7_TRAPS=0 -DSTAGE90_XNU_IOS7_VMWIRE=1 -DSTAGE90_XNU_IOS7_TIMEBASE=1 -DSTAGE90_XNU_HDD_WRITE=0 -DSTAGE90_XNU_EMMC_STRATEGY=0 -DSTAGE90_XNU_ROOT_FROM_CARD=0 -DSTAGE90_XNU_CARD_COW=0 -DSTAGE90_XNU_HFS_ROOT_RW=0 -DSTAGE90_XNU_DYLD_WITNESS=1 -DSTAGE90_XNU_UNDEF_RAISE=0",
+    "STAGE90_XNU_UNDEF_RAISE": "0",
+    "STAGE90_SKIP_USB_PREBOOT": "1",
+    "STAGE90_XNU_DYLD_WITNESS": "1",
+    "STAGE90_DWC3_READONLY": "1"
+  },
+  "inputs": [
+    "tools/build_verified.py",
+    "tools/prepare_verified_entry.py",
+    "tools/add_arm_handler_metadata.py",
+    "tools/inspect_user_image_fault.py",
+    "tools/check_os_entry.py",
+    "tools/check_fault_recovery.py",
+    "tools/test_resident_guard.py",
+    "tools/test_usb_preboot_contract.py",
+    "tools/check_usb_phy_init_contract.py",
+    "tools/check_usb_preboot_sequence.py",
+    "tools/test_usb_preboot_dma.py",
+    "tools/test_usb_preboot_window.py",
+    "tools/test_legacy_sdcc_write_gate.py",
+    "tools/test_pl181_write_gate.py",
+    "tools/test_usb_preboot_clock.py",
+    "tools/test_ios7_narrow_abi.py",
+    "tools/test_d13_ios7_traps_checker.py",
+    "tools/test_d13_shreg_geom_staging.py",
+    "tools/check_d13_shreg_geom.py",
+    "tools/patch_d13_shreg_geom.py",
+    "external/xnu-hd2-darwin13/xnu/osfmk/vm/vm_shared_region.c",
+    "external/xnu-hd2-darwin13/xnu/osfmk/arm/status.c",
+    "tools/check_d13_ios7_vmwire.py",
+    "tools/check_d13_ios7_traps.py",
+    "tools/check_1022_trap15.py",
+    "tools/check_1023_trap24.py",
+    "records/baselines/ios7-narrow-abi/mach_kernelrpc.c",
+    "records/baselines/ios7-narrow-abi/ios7_compat.h",
+    "records/baselines/ios7-narrow-abi/traps_lo.s",
+    "records/baselines/ios7-narrow-abi/syscall_sw.c",
+    "external/android_kernel_xiaomi_cancro/arch/arm/mach-msm/clock-8974.c",
+    "external/android_kernel_xiaomi_cancro/arch/arm/mach-msm/clock-local2.c",
+    "tools/check_usb_enum.py",
+    "tools/check_commpage_alias.py",
+    "tools/assemble_arm_layer.sh",
+    "tools/build_xnu_arm_kernel.sh",
+    "tools/xnu_config/boot/STAGE90_XNU.local",
+    "src/entry/build_entry.sh",
+    "scripts/build.sh",
+    "src/entry/entry_usb_dev.c",
+    "src/entry/entry_usb_dev.h",
+    "src/entry/entry_usb_enum.h",
+    "src/entry/entry_usb_enum.c",
+    "src/usb_preboot.c",
+    "src/mmu.c",
+    "src/timebase.c",
+    "src/xnu_kernel.c",
+    "src/boot_args.c",
+    "src/stage90_main.c",
+    "src/stage90.h",
+    "src/cache_ops.c",
+    "src/entry/entry_usb.h",
+    "src/entry/entry_ramdisk.s",
+    "src/entry/entry_storage.c",
+    "src/entry/entry_storage.h",
+    "src/entry/blob/xnu_arm_entry_root_hfs.img",
+    "src/platform/stage90_root_media.c",
+    "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/leo_sdcc.c",
+    "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/leo_sdcc.h",
+    "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LeoSDCC2.cpp",
+    "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LabPL181.cpp",
+    "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LabSDProtocol.h",
+    "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LeoSDFault.h",
+    "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LeoSDLog.h",
+    "external/xnu-hd2-darwin13/xnu/osfmk/arm/pmap.c",
+    "external/xnu-hd2-darwin13/xnu/osfmk/arm/arm_vm_init.c",
+    "external/xnu-hd2-darwin13/xnu/osfmk/arm/commpage/commpage.c",
+    "external/xnu-hd2-darwin13/xnu/osfmk/ipc/mach_kernelrpc.c",
+    "external/xnu-hd2-darwin13/xnu/osfmk/arm/ios7_compat.h",
+    "external/xnu-hd2-darwin13/xnu/osfmk/arm/traps_lo.s",
+    "external/xnu-hd2-darwin13/xnu/osfmk/kern/syscall_sw.c",
+    "tools/test_d13_dyld_witness.py",
+    "tools/check_d13_dyld_witness.py",
+    "external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c",
+    "src/vectors.S",
+    "src/xnu_arm_vm_init_high_va_data_abort_handler.c",
+    "src/dwc3_identify.c",
+    "src/dwc3_identify.h",
+    "src/dwc3_probe.c",
+    "src/stage90_guarded_read32.h",
+    "src/stage90_guarded_read32.c",
+    "src/stage90_guarded_read32_arm.S",
+    "tools/test_dwc3_identify.py",
+    "tools/test_dwc3_probe.py",
+    "tools/test_guarded_read32.py",
+    "tools/fixtures/dwc3_guarded_read32_harness.c",
+    "tools/check_dwc3_readonly_probe.py",
+    "src/stage90_guarded_profile.h",
+    "tools/test_guarded_irq_only.py",
+    "tools/fixtures/guarded_irq_only_harness.c",
+    "tools/fixtures/guarded_fiq_lifecycle_harness.c",
+    "tools/test_guarded_store32.py",
+    "tools/fixtures/guarded_store_harness.c",
+    "src/rpm_rbcpr_snapshot.c",
+    "src/rpm_rbcpr_snapshot.h",
+    "tools/test_rpm_rbcpr_snapshot.py",
+    "tools/fixtures/rpm_rbcpr_snapshot_harness.c",
+    "external/android_kernel_xiaomi_cancro/arch/arm/mach-msm/rpm_rbcpr_stats_v2.c",
+    "external/android_kernel_xiaomi_cancro/arch/arm/boot/dts/msm8974-v2-pm.dtsi"
+  ],
+  "stages": [
+    {
+      "name": "assembly",
+      "argv": [
+        "bash",
+        "tools/assemble_arm_layer.sh"
+      ],
+      "outputs": [
+        "out/xnu_asm_obj_d13/locore.o",
+        "out/xnu_asm_obj_d13/traps_lo.o",
+        "out/xnu_asm_obj_d13/cswitch.o"
+      ],
+      "timeout_s": 600
+    },
+    {
+      "name": "entry-preparation",
+      "argv": [
+        "python3",
+        "tools/prepare_verified_entry.py"
+      ],
+      "consumes": [
+        "out/xnu_asm_obj_d13/locore.o"
+      ],
+      "outputs": [
+        "{run_dir}/legacy-locore.o"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "name": "kernel",
+      "argv": [
+        "bash",
+        "tools/build_xnu_arm_kernel.sh"
+      ],
+      "outputs": [
+        "out/xnu_kernel_obj_d13/osfmk_arm_pmap.o",
+        "out/xnu_kernel_obj_d13/osfmk_arm_arm_vm_init.o",
+        "out/xnu_kernel_obj_d13/osfmk_arm_commpage_commpage.o",
+        "out/xnu_platform_obj_d13/stage90_root_media.o",
+        "out/xnu_kernel_src_d13.sha256"
+      ],
+      "timeout_s": 1800
+    },
+    {
+      "name": "entry",
+      "argv": [
+        "bash",
+        "build_entry.sh"
+      ],
+      "cwd": "src/entry",
+      "env": {
+        "STAGE90_EXTRA_CFLAGS": "-DSTAGE90_XNU_ENTRY=1"
+      },
+      "outputs": [
+        "out/stage90/xnu_arm_entry.elf",
+        "out/stage90/xnu_arm_entry.bin",
+        "out/stage90/xnu_arm_entry.h",
+        "out/stage90/xnu_arm_entry-config.txt"
+      ],
+      "timeout_s": 1200
+    },
+    {
+      "name": "payload",
+      "argv": [
+        "bash",
+        "scripts/build.sh"
+      ],
+      "env": {
+        "STAGE90_EXTRA_CFLAGS": "-DSTAGE90_XNU_ENTRY=1 -DSTAGE90_USB_PREBOOT_WINDOW_US=4000000 -DSTAGE90_XNU_HFS_ROOT_MEDIA=1 -DSTAGE90_HOST_SIM=0 -DSTAGE90_CACHE_MODE=0 -DSTAGE90_PMAP_ATTR_MODE=0 -DSTAGE90_SKIP_USB_PREBOOT=1 -DSTAGE90_DWC3_READONLY=1 -DSTAGE90_HW_WATCHDOG=1 -DSTAGE90_DEADMAN_ENABLE=1 -DSTAGE90_GUARDED_IRQ_ONLY=1 -DSTAGE90_DWC3_TARGET_READS=1 -DSTAGE90_GUARDED_STORE32=0 -DSTAGE90_GUARDED_STORE_SELFTEST=0 -DSTAGE90_DWC3_CLOCK_SNAPSHOT=0 -DSTAGE90_DWC3_ROOT_SNAPSHOT=0 -DSTAGE90_RPM_RBCPR_SNAPSHOT=1"
+      },
+      "outputs": [
+        "out/stage90/stage90.elf",
+        "out/stage90/stage90.bin",
+        "out/stage90/stage90-qcdt.img",
+        "out/stage90/stage90-build-config.txt"
+      ],
+      "timeout_s": 900
+    }
+  ],
+  "image": "out/stage90/stage90-qcdt.img",
+  "android_boot_header": true,
+  "symbols": [
+    {
+      "artifact": "out/stage90/xnu_arm_entry.elf",
+      "required": [
+        "pmap_create_sharedpage",
+        "arm_vm_init",
+        "commpage_populate",
+        "entry_root_media_register",
+        "entry_storage_driver_read",
+        "entry_usb_dev_init"
+      ],
+      "absent": [
+        "entry_storage_driver_write",
+        "entry_root_media_register_card",
+        "entry_root_media_register_card_raw",
+        "leo_sd_write_sector",
+        "write_ready",
+        "_Z19ios7lab_register_sdP9IOService",
+        "_ZN12IOS7LabPL1816sectorEyPhb",
+        "_ZTV12IOS7LabPL181",
+        "ios7lab_mach_vm_map_trap",
+        "ios7lab_mach_port_construct_trap",
+        "ios7lab_mach_port_destruct_trap",
+        "ios7lab_mach_port_guard_trap",
+        "ios7lab_mach_port_unguard_trap"
+      ]
+    },
+    {
+      "artifact": "out/stage90/stage90.elf",
+      "required": [
+        "stage90_dwc3_readonly_probe",
+        "mi4_dwc3_identify",
+        "stage90_guarded_read32",
+        "stage90_guarded_read32_fault",
+        "stage90_guarded_read32_recovery",
+        "stage90_guarded_read32_abort_policy",
+        "stage90_data_abort_c_handler",
+        "stage90_guarded_fiq_hook_contract",
+        "stage90_guarded_fiq_park",
+        "mi4_rpm_rbcpr_snapshot"
+      ],
+      "absent": [
+        "stage90_guarded_write32",
+        "stage90_guarded_write32_store_arm",
+        "stage90_guarded_write32_fault",
+        "stage90_guarded_write32_recovery"
+      ]
+    }
+  ],
+  "embedded": [
+    {
+      "container": "out/stage90/stage90.bin",
+      "payload": "out/stage90/xnu_arm_entry.bin"
+    },
+    {
+      "container": "out/stage90/stage90-qcdt.img",
+      "payload": "out/stage90/xnu_arm_entry.bin"
+    }
+  ],
+  "checks": [
+    {
+      "argv": [
+        "python3",
+        "tools/test_usb_preboot_contract.py",
+        "--source",
+        "src/usb_preboot.c",
+        "--header",
+        "src/entry/entry_usb_dev.h",
+        "--strings"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_usb_phy_init_contract.py",
+        "--header",
+        "src/entry/entry_usb_dev.h"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_usb_preboot_sequence.py",
+        "--source",
+        "src/usb_preboot.c",
+        "--header",
+        "src/entry/entry_usb_dev.h",
+        "--complete"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_usb_preboot_dma.py",
+        "--source",
+        "src/usb_preboot.c",
+        "--header",
+        "src/entry/entry_usb_dev.h"
+      ],
+      "timeout_s": 90
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_usb_preboot_window.py",
+        "--source",
+        "src/usb_preboot.c"
+      ],
+      "timeout_s": 60
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_legacy_sdcc_write_gate.py",
+        "--source",
+        "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/leo_sdcc.c",
+        "--header",
+        "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/leo_sdcc.h",
+        "--owner",
+        "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LeoSDCC2.cpp",
+        "--dependency-dir",
+        "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform"
+      ],
+      "timeout_s": 120
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_pl181_write_gate.py",
+        "--source",
+        "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LabPL181.cpp",
+        "--protocol-header",
+        "external/xnu-hd2-darwin13/xnu/iokit/Drivers/KernelBuiltIn/ARM/AppleARMPlatform/IOS7LabSDProtocol.h"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_commpage_alias.py",
+        "out/stage90/xnu_arm_entry.elf"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_usb_preboot_clock.py",
+        "--source",
+        "src/usb_preboot.c",
+        "--vendor-clock",
+        "external/android_kernel_xiaomi_cancro/arch/arm/mach-msm/clock-8974.c",
+        "--vendor-rcg",
+        "external/android_kernel_xiaomi_cancro/arch/arm/mach-msm/clock-local2.c"
+      ],
+      "timeout_s": 120
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_ios7_narrow_abi.py",
+        "--repo-root",
+        "{repo_root}"
+      ],
+      "timeout_s": 120
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_d13_ios7_traps_checker.py"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_d13_ios7_vmwire.py",
+        "out/stage90/xnu_arm_entry.elf"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_d13_ios7_traps.py",
+        "out/stage90/xnu_arm_entry.elf",
+        "--expect",
+        "on"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_1022_trap15.py",
+        "out/stage90/xnu_arm_entry.elf",
+        "--expect",
+        "off"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_1023_trap24.py",
+        "out/stage90/xnu_arm_entry.elf",
+        "--expect",
+        "off"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_d13_shreg_geom_staging.py"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_d13_shreg_geom.py",
+        "--tree",
+        "{repo_root}/external/xnu-hd2-darwin13/xnu",
+        "--expect",
+        "staged"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/patch_d13_shreg_geom.py",
+        "{repo_root}/external/xnu-hd2-darwin13/xnu",
+        "--verify-off"
+      ],
+      "timeout_s": 30
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_d13_dyld_witness.py",
+        "--source",
+        "external/xnu-hd2-darwin13/xnu/osfmk/arm/trap.c"
+      ],
+      "timeout_s": 60
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_d13_dyld_witness.py",
+        "out/stage90/xnu_arm_entry.elf",
+        "--expect",
+        "on"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_guarded_read32.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "gcc"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_guarded_read32.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "clang",
+        "--sanitize"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_dwc3_identify.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "gcc"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_dwc3_identify.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "clang",
+        "--sanitize"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_dwc3_probe.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "gcc"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_dwc3_probe.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "clang",
+        "--sanitize"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_guarded_irq_only.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "gcc"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_guarded_irq_only.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "clang",
+        "--sanitize"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_guarded_store32.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "gcc"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_guarded_store32.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "clang",
+        "--sanitize"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_rpm_rbcpr_snapshot.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "gcc"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/test_rpm_rbcpr_snapshot.py",
+        "--repo-root",
+        "{repo_root}",
+        "--cc",
+        "clang",
+        "--sanitize"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "argv": [
+        "python3",
+        "tools/check_dwc3_readonly_probe.py",
+        "--payload",
+        "out/stage90/stage90.elf",
+        "--entry",
+        "out/stage90/xnu_arm_entry.elf",
+        "--config",
+        "out/stage90/stage90-build-config.txt",
+        "--irq-only",
+        "--rpm-snapshot"
+      ],
+      "timeout_s": 180
+    }
+  ]
+}

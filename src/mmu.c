@@ -5518,6 +5518,10 @@ static void build_identity_table(void)
     /* Primary-port resource; no controller access or initialization here. */
     map_section_mmio(0xf9200000u, 0xf9200000u);
 #endif
+#if defined(STAGE90_RPM_RBCPR_SNAPSHOT) && STAGE90_RPM_RBCPR_SNAPSHOT
+    /* RPM data-memory telemetry only; no vote, PMIC or security operations. */
+    map_section_mmio(0xfc100000u, 0xfc100000u);
+#endif
 }
 
 static void enable_identity_mmu(void)

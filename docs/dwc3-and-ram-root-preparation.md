@@ -216,6 +216,48 @@ cannot establish voltage independence. Root configuration, inherited supplies,
 quiescence and the hardware adapter remain separate obligations. See the milestone
 record for exact build/boot evidence and limits.
 
+## RPM telemetry: read-only, not clock authorization
+
+`src/rpm_rbcpr_snapshot.{c,h}` is an original numeric decoder for the supplier
+V2-shaped RPM data-memory report. Actual device-tree metadata confirmed the
+resource base/size and relative-pointer slot; an independent ARM AAPCS compilation
+checked the inline CX offsets. No vendor function or structure overlay is used.
+The format has no firmware version/magic, and status is a change counter, not an
+odd/even seqlock.
+
+The default-OFF `STAGE90_RPM_RBCPR_SNAPSHOT` profile disables STORE capability and
+all other target modes. After exact read/fault selftests and live-watchdog gates,
+it permits at most 24 guarded loads: two fixed twelve-read passes. It validates
+an aligned relative pointer, bounded block, metadata, counter/pointer stability
+and matching repeated payloads. A callback fault or deadline admission failure
+stops immediately. The only added identity mapping is the declared RPM data
+section; no RPM vote, PMIC/SPMI/SCM operation or security change is included.
+
+Stable sampling is **not** proof of freshness, atomicity, firmware ABI, ADC
+voltage, raw-field units, a lasting supply floor or safe clock writes. In
+particular, Linux regulator voltage interfaces may return a cached vote rather
+than remote aggregate state. Existing Android debugfs access was refused and no
+security setting was changed. The independent RAM-boot report remains a separate
+runtime gate, not an alternative Android access path or an authorization bypass.
+
+```sh
+python3 tools/test_rpm_rbcpr_snapshot.py --cc clang --sanitize
+python3 tools/test_rpm_rbcpr_capture.py
+python3 tools/check_rpm_rbcpr_capture.py /ABS/PRIVATE/recovered-console
+```
+
+The full-build profile is `tools/build_profile_d13_rpm_rbcpr_snapshot.json`
+(five stages, 33 acceptance commands). Consult the milestone record for actual
+runtime status; offline tests alone do not establish that the RPM data is readable
+from the payload or that a reported corner authorizes any subsequent write.
+
+One real RAM boot has now completed all 24 reads and recovered Android. The two
+passes matched with num_rails=2, status `0x13` and 3/3 CX metadata, but sampled
+corner and voltage fields were zero. The consumer's OFF label is not physical
+power-off evidence, and this source lacks a producer/validity/freshness contract.
+Supply level remains UNKNOWN. This statistics path is not being expanded merely
+to obtain write approval; the master-root transaction remains undeployed.
+
 ## Hardware boundary
 
 The EP0 planner commits **software** address/configuration after matching STATUS

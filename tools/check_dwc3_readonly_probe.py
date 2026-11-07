@@ -122,7 +122,8 @@ def inspect_irq_only(at, symbols, require):
 
 
 def inspect(payload, entry, config, irq_only=False, recovery_only=False,
-            clock_snapshot=False, root_snapshot=False, store_selftest=False):
+            clock_snapshot=False, root_snapshot=False, store_selftest=False,
+            rpm_snapshot=False):
     checks = 0
 
     def require(test, message):
@@ -131,9 +132,10 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
         if not test:
             raise ValueError(message)
 
-    require(sum((recovery_only, clock_snapshot, root_snapshot, store_selftest)) <= 1,
+    require(sum((recovery_only, clock_snapshot, root_snapshot, store_selftest, rpm_snapshot)) <= 1,
             'snapshot, recovery-only and store-selftest modes are mutually exclusive')
     require(not store_selftest or irq_only, 'store-selftest requires --irq-only')
+    require(not rpm_snapshot or irq_only, 'rpm-snapshot requires --irq-only')
     defines = {}
     for line in config.read_text().splitlines():
         m = re.fullmatch(r'#define (STAGE90_\w+) (\S+)', line)
@@ -158,6 +160,11 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
         literal = re.fullmatch(r'(0[xX][0-9a-fA-F]+|0|[1-9][0-9]*)(?:[uU](?:[lL]{1,2})?|[lL]{1,2}[uU]?)?', raw)
         require(literal is not None and int(literal[1], 0) == int(store_selftest),
                 'actual payload configuration differs or is unexpanded: '+name)
+
+    raw_rpm = defines.get('STAGE90_RPM_RBCPR_SNAPSHOT', '' if rpm_snapshot else '0')
+    rpm_literal = re.fullmatch(r'(0[xX][0-9a-fA-F]+|0|[1-9][0-9]*)(?:[uU](?:[lL]{1,2})?|[lL]{1,2}[uU]?)?', raw_rpm)
+    require(rpm_literal is not None and int(rpm_literal[1], 0) == int(rpm_snapshot),
+            'actual payload configuration differs or is unexpanded: RPM_RBCPR_SNAPSHOT')
 
     raw_root = defines.get('STAGE90_DWC3_ROOT_SNAPSHOT', '' if root_snapshot else '0')
     root_literal = re.fullmatch(r'(0[xX][0-9a-fA-F]+|0|[1-9][0-9]*)(?:[uU](?:[lL]{1,2})?|[lL]{1,2}[uU]?)?', raw_root)
@@ -193,11 +200,25 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
         m = re.fullmatch(r'([0-9a-fA-F]+) ([0-9a-fA-F]+) (\w) (\S+)', line)
         if m:
             symbol_types[m[4]] = m[3]
-    if store_selftest:
+    if store_selftest or rpm_snapshot:
         state = symbols.get('stage90_guarded_read32_state')
-        require(state is not None and state[1] == 56 and
+        require(state is not None and state[1] == (56 if store_selftest else 52) and
                 symbol_types.get('stage90_guarded_read32_state') in ('b', 'B'),
                 'actual guard state B-symbol size differs')
+    if rpm_snapshot:
+        require(not any(name.startswith('stage90_guarded_write32') for name in symbols),
+                'RPM snapshot retains linked guarded-write capability')
+        for name in ('mi4_rpm_rbcpr_snapshot', 'rpm_probe_read'):
+            linked = symbols.get(name)
+            require(linked is not None and linked[1] > 0, 'missing linked symbol '+name)
+            at(linked[0], linked[1], True)
+        expected_offsets = struct.pack('<10I', 0, 4, 8, 0xc, 0x14, 0x5c, 0xa4, 0xe8, 0xec, 4)
+        # Data contracts, not proof of callback dataflow or runtime MMU mapping.
+        for name in ('rpm_rbcpr_sample_offsets', 'rpm_probe_offsets'):
+            offsets = symbols.get(name)
+            require(offsets is not None and offsets[1] == 40 and
+                    at(offsets[0], 40) == expected_offsets,
+                    'RPM snapshot offset table opcodes/data/size differ: '+name)
     if irq_only:
         inspect_irq_only(at, symbols, require)
     for name in ('stage90_guarded_read32', 'stage90_guarded_read32_abort_policy',
@@ -375,10 +396,46 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
         require(guard_calls == ['stage90_guarded_read32']*3 +
                 ['stage90_guarded_write32', 'stage90_guarded_read32', 'stage90_guarded_write32'],
                 'store-selftest calls must follow read/fault selftest, RAM read/write/read, unmapped write order')
+    if not rpm_snapshot:
+        require('<mi4_rpm_rbcpr_snapshot>' not in probe and '<rpm_probe_read>' not in probe,
+                'non-RPM probe retains RPM core/callback references')
+    if rpm_snapshot:
+        selected = probe
+        helper = 'dwc3_probe_guard_selftest'
+        if helper in bodies:
+            reference = r'\bbl\b[^\n]*<'+helper+r'>'
+            require(len(re.findall(reference, probe)) == 1 and
+                    helper in symbols and symbols[helper][1] > 0,
+                    'outlined RPM guard selftest must be sized and directly called exactly once')
+            helper_body = body(helper)
+            require('<'+helper+'>' not in helper_body,
+                    'RPM guard selftest helper may not recurse')
+            selected = re.sub(reference, lambda _: helper_body, selected)
+        callback = body('rpm_probe_read')
+        core = body('mi4_rpm_rbcpr_snapshot')
+        forbidden = ('mi4_dwc3_identify', 'mi4_dwc3_clock_snapshot',
+                     'mi4_dwc3_root_snapshot', 'stage90_guarded_write32',
+                     'dwc3_probe_store_selftest', 'dwc3_probe_read',
+                     'usb_preboot_', 'entry_usb_')
+        require(not any('<'+name in selected+'\n'+callback+'\n'+core for name in forbidden),
+                'RPM snapshot probe/helper/core/callback retains controller/store/stream references')
+        require(len(re.findall(r'\bbl\b[^\n]*<stage90_guarded_read32>', selected)) == 5,
+                'RPM snapshot probe/helper must directly call guarded reader exactly five times')
+        require(len(re.findall(r'\bbl\b[^\n]*<stage90_guarded_read32>', callback)) == 1,
+                'RPM callback must directly call guarded reader exactly once')
+        core_reference = r'\bbl\b[^\n]*<mi4_rpm_rbcpr_snapshot>'
+        require(len(re.findall(core_reference, probe)) == 1 and
+                '<mi4_rpm_rbcpr_snapshot>' not in callback and
+                (helper not in bodies or '<mi4_rpm_rbcpr_snapshot>' not in helper_body),
+                'RPM snapshot probe must directly call RPM core exactly once')
+        core_position = re.search(core_reference, selected).start()
+        reads = list(re.finditer(r'\bbl\b[^\n]*<stage90_guarded_read32>', selected))
+        require(all(read.start() < core_position for read in reads),
+                'RPM core precedes guarded-load selftest or live watchdog reads')
     if not root_snapshot:
         require('<mi4_dwc3_root_snapshot>' not in probe,
                 'non-root probe retains root-snapshot core call')
-    if store_selftest:
+    if store_selftest or rpm_snapshot:
         pass  # The bounded combined probe/helper call contract was checked above.
     elif recovery_only:
         require('<mi4_dwc3_identify>' not in probe and '<mi4_dwc3_clock_snapshot>' not in probe and
@@ -409,7 +466,8 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
                 'probe lacks guarded reader or actual identity core')
         require(probe.index('<stage90_guarded_read32>') < probe.index('<mi4_dwc3_identify>'),
                 'identity core precedes guarded-load selftest')
-    finish = (b'dwc3_ro store selftest passed; RAM writes only; controller target reads inhibited' if store_selftest else
+    finish = (b'rpm_ro finished; sampled telemetry only; no clock-write authorization' if rpm_snapshot else
+              b'dwc3_ro store selftest passed; RAM writes only; controller target reads inhibited' if store_selftest else
               inhibited if recovery_only else
               b'dwc3_ro finished; GCC root snapshot only; no DWC3 core reads' if root_snapshot else
               b'dwc3_ro finished; GCC clock snapshot only; no DWC3 core reads' if clock_snapshot else
@@ -417,6 +475,9 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
     if store_selftest:
         require(b'DWC3 guarded RAM store selftest; no MMIO target writes' in data,
                 'missing linked diagnostic for guarded RAM store selftest start')
+    if rpm_snapshot:
+        require(b'RPM RBCPR V2 read-only snapshot; no clock or supply writes' in data,
+                'missing linked diagnostic for RPM RBCPR snapshot start')
     for marker in (b'dwc3_ro guard selftest passed: RAM and translation-fault recovery',
                    b'dwc3_ro skipped: guard translation-fault selftest failed',
                    b'mmu legacy CI USB probe skipped; primary port is DWC3', finish):
@@ -434,6 +495,8 @@ def inspect(payload, entry, config, irq_only=False, recovery_only=False,
                 'entry USB function is not a bare return: '+name)
     print('PASS:', checks, 'actual linked probe/config/opcode/CI-disabled checks')
     print('LIMIT: static acceptance only; no ARM exception, MMIO completion, or USB proof')
+    if rpm_snapshot:
+        print('LIMIT: RPM linked tables/direct calls only; source and host tests must establish address/phase/deadline policy; no runtime mapping, universal CFG, supply-health or clock-write authorization proof')
     if store_selftest:
         print('LIMIT: source-known direct-call contract only; per-call address/state policy needs source review and host tests; no universal CFG or no-hardware-writes proof')
 
@@ -454,12 +517,17 @@ def main():
                       help='require thirteen-GCC-root snapshot mode, not DWC3 core identification')
     mode.add_argument('--store-selftest', action='store_true',
                       help='require IRQ-only RAM/unmapped guarded-store selftests; target reads inhibited')
+    mode.add_argument('--rpm-snapshot', action='store_true',
+                      help='require IRQ-only RPM RBCPR V2 telemetry; no clock-write authorization')
     args = parser.parse_args()
+    if args.rpm_snapshot and not args.irq_only:
+        parser.error('--rpm-snapshot requires --irq-only')
     if args.store_selftest and not args.irq_only:
         parser.error('--store-selftest requires --irq-only')
     inspect(args.payload, args.entry, args.config, irq_only=args.irq_only,
             recovery_only=args.recovery_only, clock_snapshot=args.clock_snapshot,
-            root_snapshot=args.root_snapshot, store_selftest=args.store_selftest)
+            root_snapshot=args.root_snapshot, store_selftest=args.store_selftest,
+            rpm_snapshot=args.rpm_snapshot)
 
 
 if __name__ == '__main__':
