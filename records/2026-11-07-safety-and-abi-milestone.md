@@ -95,24 +95,56 @@ bytes are published with these tools.
 
 ## Remaining work
 
-The corrective sources are not yet hardware-proven. The fresh full build completed
-all assembly, preparation, kernel, entry and payload stages and **18 final checks**.
-The published image SHA256 is:
+The corrective full build completed assembly, preparation, kernel, entry and payload
+stages and **18 final checks**. Its image SHA256 is:
 
 `a06cbdcc0499d83250ba3aac0dd094a1afcfc19dce0abe71581a80692a236c50`
 
-Downloaded artifacts matched the recorded hashes. The actual configuration keeps
-all medium-write gates and broad compatibility OFF; narrow VM-wire/timebase paths
-are ON. Actual linked-code checks retain the read backend and exclude the extra
-medium-write and port/map laboratory entry points. The geometry-tool correction
-also passed eight regression groups and source round-trip checks.
+It has now received **one bounded RAM-boot experiment**. VM allocation with the
+correct wire flags returned success, followed by successful deallocation: the
+specific VM-wire fix has hardware evidence. Dyld subsequently reached its fatal
+halt again, now with a dynamically formatted message that has not yet been read.
+This is not successful launchd service execution or proof of any particular next
+error. The clock CFG read back `0x10f`; USB acceptance still failed with zero data
+records. Android recovered automatically, with no second boot attempt.
 
-**This corrective image has not been booted.** The next hardware milestone is one
-bounded, preobserved RAM boot: verify the new CFG readback, determine whether the
-host receives adjacent valid records, recover the actual dyld/launchd progress,
-and retain explicit recovery deadlines. A build pass is not USB or iOS success.
-The RAM-root dependency set must also be completed before a full service-system
-claim is possible.
+### USB controller-selection correction
+
+A read-only UDC binding from the recovered phone identifies **DWC3 at
+`0xf9200000`**, while the experimental code programs the separate CI13xxx at
+`0xf9a55000`. Supplier device-tree configuration disables the CI node; the DWC3
+platform driver explicitly routes the primary USB port to its controller. This
+explains why CI register readbacks and CI-only model tests do not establish a
+working physical phone link. It does not measure the bootloader's exact mux/power
+state or prove a DWC3 implementation already works.
+
+The next independent build disables both preboot and XNU-side CI initialization
+and diagnostics, retains all medium-write gates and broad compatibility OFF,
+and enables a bounded, copyin/copyinstr-only dyld error witness. Its actual C
+functions passed Clang and GCC regression tests in 32/64-bit address-size models
+(41 cases per model) plus three negative controls. It preserves the saved PC and
+exception delivery; it does not skip dyld's fatal instruction. Runtime error
+recovery and actual linked configuration remain separate acceptance gates.
+
+DWC3 needs its own event ring, endpoint commands and TRBs; changing the CI base
+address is not a port. Offline, revision-aware event/EP0 work precedes any new
+bounded hardware identification or initialization.
+
+### Root-system provenance and capacity
+
+The current 512 KiB RAM root contains only launchd and dyld, with no dependency
+libraries, shared cache or `/dev` mountpoint. The larger host-side root image is a
+historical laboratory derivative containing injected observers and modified
+service configuration, not evidence of untouched stock iOS. Those jobs will not
+be copied wholesale or used as proof of genuine service behavior.
+
+The launchd dependency closure includes 33 cached libraries. The complete cache
+is about 301 MiB and cannot be embedded in the actually owned 64 MiB window.
+Simple cache slicing is not runnable library restoration: optimized pointers,
+relocations, bindings and shared LINKEDIT require correct handling. A smaller RAM
+root is only a feasibility target until its executable dependencies, layout and
+real startup are validated. Neither these inventory findings nor a build pass
+establish complete iOS operation.
 
 Raw recovered logs, device identifiers, proprietary images, and license-uncertain
 external port snapshots remain private. This milestone publishes only reviewable
