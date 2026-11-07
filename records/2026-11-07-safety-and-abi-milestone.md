@@ -95,12 +95,24 @@ bytes are published with these tools.
 
 ## Remaining work
 
-The corrective sources are not yet hardware-proven. A fresh full build is in
-progress after fixing a staging tool's accidental dependence on two unrelated
-header functions being adjacent. Eight regression groups retain rejection of
-missing, duplicated, changed or partially staged geometry helpers and constants.
-The fresh profile requires 18 final checks. Only after successful publication and
-actual-artifact safety review can another bounded RAM-boot experiment be considered.
+The corrective sources are not yet hardware-proven. The fresh full build completed
+all assembly, preparation, kernel, entry and payload stages and **18 final checks**.
+The published image SHA256 is:
+
+`a06cbdcc0499d83250ba3aac0dd094a1afcfc19dce0abe71581a80692a236c50`
+
+Downloaded artifacts matched the recorded hashes. The actual configuration keeps
+all medium-write gates and broad compatibility OFF; narrow VM-wire/timebase paths
+are ON. Actual linked-code checks retain the read backend and exclude the extra
+medium-write and port/map laboratory entry points. The geometry-tool correction
+also passed eight regression groups and source round-trip checks.
+
+**This corrective image has not been booted.** The next hardware milestone is one
+bounded, preobserved RAM boot: verify the new CFG readback, determine whether the
+host receives adjacent valid records, recover the actual dyld/launchd progress,
+and retain explicit recovery deadlines. A build pass is not USB or iOS success.
+The RAM-root dependency set must also be completed before a full service-system
+claim is possible.
 
 Raw recovered logs, device identifiers, proprietary images, and license-uncertain
 external port snapshots remain private. This milestone publishes only reviewable
